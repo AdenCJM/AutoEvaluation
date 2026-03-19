@@ -1,0 +1,90 @@
+# AutoEvaluation Configuration
+# ==========================
+# Edit this file or run `python3 setup.py` to generate it interactively.
+
+# --- Provider ---
+# Supported: gemini, openai, anthropic
+provider: gemini
+model: gemini-2.5-flash
+api_key_env: GEMINI_API_KEY   # name of the env var in .env holding your API key
+
+# --- Judge (optional, defaults to primary provider) ---
+# Use a separate model for evaluation to avoid self-judging bias.
+# If omitted, the primary provider/model is used for judging too.
+# judge_provider: openai
+# judge_model: gpt-4o
+# judge_api_key_env: OPENAI_API_KEY
+
+# --- Semi-Blind Judge ---
+# When true, the judge sees SKILL.md content for the task_accuracy
+# dimension only. Other dimensions are still evaluated blind.
+judge_sees_skill: false
+
+# --- Paths ---
+skill_path: SKILL.md
+prompts_path: prompts/prompts.json
+results_tsv: results.tsv
+
+# --- Run Duration ---
+# Control how long the optimisation loop runs. Set one or both.
+# If both are set, whichever limit is hit first stops the loop.
+# Set to 0 or omit to run indefinitely (until manually stopped).
+max_iterations: 0     # stop after N experiments (0 = unlimited)
+max_hours: 0          # stop after N hours (0 = unlimited, accepts decimals e.g. 1.5)
+max_cost_usd: 0       # stop after estimated spend exceeds this (0 = unlimited)
+convergence_window: 0 # stop after N iterations with no improvement (0 = disabled)
+
+# --- Performance ---
+max_concurrent: 1     # parallel LLM calls for generation and evaluation (1 = serial)
+
+# --- LLM Judge Dimensions ---
+# Each dimension is scored 1–5 by the LLM, normalised to 0–1, then weighted.
+# Weights must sum to 1.0 (across all metrics, including any deterministic ones).
+#
+# direction: higher_is_better (default) or lower_is_better
+#   - higher_is_better: score goes up = good (e.g. quality, accuracy)
+#   - lower_is_better: score goes up = bad (e.g. error rate, lag time)
+#   For lower_is_better metrics, the score is inverted (1 - raw) before weighting.
+llm_judge_dimensions:
+  - name: human_score
+    weight: 0.30
+    direction: higher_is_better
+    rubric: |
+      Does this read like a competent human wrote it, or does it have telltale
+      patterns of AI-generated text? Look for overly consistent paragraph lengths,
+      repetitive sentence structures, and words humans rarely use.
+      1 = obviously AI-generated
+      5 = indistinguishable from skilled human writer
+
+  - name: task_accuracy
+    weight: 0.40
+    direction: higher_is_better
+    rubric: |
+      Does the output correctly follow the skill instructions? Does it do what
+      the skill asked it to do?
+      1 = ignores the instructions entirely
+      5 = perfect adherence
+
+  - name: quality
+    weight: 0.30
+    direction: higher_is_better
+    rubric: |
+      Is this high-quality output overall? Consider clarity, structure, and
+      whether it achieves its stated purpose.
+      1 = poor quality
+      5 = excellent
+
+# --- Deterministic Metrics (optional, advanced) ---
+# If you have a custom eval_deterministic.py, list the metric names and weights
+# here. The script must return JSON: {"metric_name": {"score": 0.0-1.0, ...}}
+# If empty or omitted, only LLM judge metrics are used.
+# Each metric can also have direction: higher_is_better (default) or lower_is_better.
+deterministic_metrics: []
+# Example:
+# deterministic_metrics:
+#   - name: banned_words
+#     weight: 0.15
+#     direction: higher_is_better
+#   - name: response_time
+#     weight: 0.10
+#     direction: lower_is_better

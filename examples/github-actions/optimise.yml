@@ -1,0 +1,63 @@
+name: AutoEvaluation Optimisation Loop
+
+on:
+  schedule:
+    # Runs daily at 2am UTC — adjust to your preference
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Number of iterations to run'
+        required: false
+        default: '10'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: optimise
+  cancel-in-progress: true
+
+jobs:
+  optimise:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyyaml
+          # Read provider from config and install the right SDK
+          PROVIDER=$(python3 -c "import yaml; print(yaml.safe_load(open('config.yaml'))['provider'])")
+          case "$PROVIDER" in
+            gemini)  pip install google-genai ;;
+            openai)  pip install openai ;;
+            anthropic) pip install anthropic ;;
+          esac
+
+      - name: Set API key from secret
+        run: |
+          # Reads api_key_env from config to know which env var to set
+          KEY_NAME=$(python3 -c "import yaml; print(yaml.safe_load(open('config.yaml'))['api_key_env'])")
+          echo "${KEY_NAME}=${{ secrets.LLM_API_KEY }}" >> $GITHUB_ENV
+
+      - name: Run optimisation loop
+        run: |
+          ITERS=${{ github.event.inputs.iterations || '10' }}
+          python3 tools/run_loop.py --iterations "$ITERS"
+
+      - name: Commit results
+        run: |
+          git config user.name "AutoEvaluation Bot"
+          git config user.email "autoevaluation@users.noreply.github.com"
+          git add SKILL.md SKILL.md.best results.tsv
+          git diff --cached --quiet || git commit -m "autoeval: $(tail -1 results.tsv | cut -f1) — score $(tail -1 results.tsv | cut -f3)"
+          git push

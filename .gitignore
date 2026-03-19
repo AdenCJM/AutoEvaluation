@@ -1,0 +1,26 @@
+# Secrets & config
+.env
+/config.yaml
+
+# Generated files
+.tmp/
+results.tsv
+SKILL.md.best
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Claude Code / gstack
+.claude/
+.gstack/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/

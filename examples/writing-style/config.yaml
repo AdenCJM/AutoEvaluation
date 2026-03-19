@@ -1,0 +1,90 @@
+# Writing Style Example — Configuration
+# =======================================
+# Copy this to the project root: cp examples/writing-style/config.yaml config.yaml
+# Then edit .env with your API key and run: python3 tools/run_loop.py
+
+# --- Provider ---
+provider: gemini
+model: gemini-2.5-flash
+api_key_env: GEMINI_API_KEY
+
+# --- Semi-Blind Judge ---
+# Judge sees SKILL.md for task_accuracy only; other dimensions evaluated blind.
+judge_sees_skill: true
+
+# --- Paths ---
+skill_path: SKILL.md
+prompts_path: prompts/prompts.json
+results_tsv: results.tsv
+
+# --- Run Duration ---
+max_iterations: 20
+max_hours: 0
+max_cost_usd: 5.00
+convergence_window: 10
+
+# --- Performance ---
+max_concurrent: 3
+
+# --- LLM Judge Dimensions ---
+# Weights across all metrics (LLM + deterministic) sum to 1.0.
+llm_judge_dimensions:
+  - name: human_score
+    weight: 0.15
+    direction: higher_is_better
+    rubric: |
+      Does this read like a competent human wrote it, or does it have telltale
+      patterns of AI-generated text? Look for overly consistent paragraph lengths,
+      repetitive sentence structures, and words humans rarely use.
+      1 = obviously AI-generated
+      5 = indistinguishable from skilled human writer
+
+  - name: task_accuracy
+    weight: 0.25
+    direction: higher_is_better
+    rubric: |
+      Does the output correctly follow the skill instructions? Does it do what
+      the skill asked it to do?
+      1 = ignores the instructions entirely
+      5 = perfect adherence
+
+  - name: quality
+    weight: 0.15
+    direction: higher_is_better
+    rubric: |
+      Is this high-quality output overall? Consider clarity, structure, and
+      whether it achieves its stated purpose.
+      1 = poor quality
+      5 = excellent
+
+# --- Deterministic Metrics ---
+# These come from eval_deterministic.py (copy it to tools/ first).
+# All 9 metrics from the writing-style evaluator.
+deterministic_metrics:
+  - name: banned_words
+    weight: 0.08
+    direction: higher_is_better
+  - name: em_dashes
+    weight: 0.04
+    direction: higher_is_better
+  - name: contraction_ratio
+    weight: 0.06
+    direction: higher_is_better
+  - name: not_x_is_y
+    weight: 0.04
+    direction: higher_is_better
+  - name: au_spelling
+    weight: 0.07
+    direction: higher_is_better
+  - name: mean_sent_len
+    weight: 0.04
+    direction: higher_is_better
+  - name: sent_len_var
+    weight: 0.04
+    direction: higher_is_better
+  - name: opener_variety
+    weight: 0.04
+    direction: higher_is_better
+  - name: parallel_clusters
+    weight: 0.04
+    direction: higher_is_better

@@ -1,0 +1,12 @@
+[
+  {
+    "id": "example_task_1",
+    "genre": "general",
+    "prompt": "Write a short paragraph explaining what you do and why it matters."
+  },
+  {
+    "id": "example_task_2",
+    "genre": "general",
+    "prompt": "Write a brief email to a colleague summarising the key takeaways from a meeting."
+  }
+]

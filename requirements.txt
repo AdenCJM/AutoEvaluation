@@ -1,0 +1,7 @@
+# Core dependency
+pyyaml>=6.0
+
+# Install ONE provider SDK based on your choice during setup:
+#   pip install google-genai      # Gemini
+#   pip install openai            # OpenAI
+#   pip install anthropic         # Anthropic
