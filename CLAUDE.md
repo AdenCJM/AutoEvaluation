@@ -56,8 +56,3 @@ python3 tools/run_loop.py
 - Weights in the rubric (LLM judge + deterministic) must sum to 1.0 (auto-normalised with warning if not)
 - Config is validated at startup via `utils.validate_config()` — catches missing keys and bad weights
 
-## Design System
-Always read DESIGN.md before making any visual or UI decisions.
-All font choices, colors, spacing, and aesthetic direction are defined there.
-Do not deviate without explicit user approval.
-In QA mode, flag any code that doesn't match DESIGN.md.
