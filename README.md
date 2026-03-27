@@ -48,6 +48,8 @@ exp_005     0.9692   KEEP       Added concrete em-dash before/after example
 
 The full experiment history is in `examples/writing-style/sample-results.tsv`.
 
+![AutoEvaluation dashboard showing score trend and per-metric cards](docs/dashboard.png)
+
 ## Quick start
 
 ### Prerequisites
@@ -131,7 +133,7 @@ Open another terminal:
 python3 tools/dashboard_server.py
 ```
 
-Then open http://localhost:8050 in your browser. See `demo_dashboard.html` for a preview of what the dashboard looks like.
+Then open http://localhost:8050 in your browser.
 
 ---
 
