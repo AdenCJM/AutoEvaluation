@@ -8,6 +8,7 @@ This example shows how to use AutoEvaluation to optimise a writing style skill t
 - `prompts.json` — 10 test prompts across different writing genres (emails, blog posts, reports, etc.)
 - `eval_deterministic.py` — Custom deterministic metrics (banned words, em dashes, contractions, AU spelling, sentence variety)
 - `config.yaml` — Example config with both deterministic and LLM judge metrics
+- `sample-results.tsv` — Real experiment results from a 20-iteration run (baseline 0.9508 → best 0.9692)
 
 ## Config
 

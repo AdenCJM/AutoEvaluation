@@ -1,10 +1,12 @@
 # AutoEvaluation
 
-An autonomous optimisation engine that makes any set of LLM instructions measurably better — without a human in the loop.
+**Evals that fix themselves.**
 
-You give it a **skill file** (instructions for an LLM), a set of **test prompts**, and a **scoring rubric**. It runs a loop: generate outputs, score them, find the weakest metrics, tweak the instructions, re-score, keep or revert. Hill-climbing on prompt engineering, fully hands-off.
+Give it a prompt, a set of test scenarios, and a scoring rubric. It runs autonomously: generate outputs, score them, find the weakest metric, rewrite the prompt to fix it, re-score, keep or revert. Hill-climbing on prompt engineering, fully hands-off.
 
-Point it at a skill, go to bed, wake up with a better prompt.
+We pointed it at a writing style guide and let it run overnight. It made 20 attempts, kept 2, and improved the composite score from 0.9508 to 0.9692. The changes it made: strengthened contraction rules, added concrete before/after examples for em dash replacement. Every other LLM prompt optimiser (DSPy, TextGrad, MIPRO) requires you to write Python. This one works on plain markdown files.
+
+Point it at any LLM instruction set. Go to bed. Wake up with a measurably better prompt.
 
 ## How it works
 
@@ -30,6 +32,22 @@ Point it at a skill, go to bed, wake up with a better prompt.
 4. **Decide** — if the score improved, keep the change; otherwise revert
 5. **Repeat** — until the iteration/time limit is hit (or indefinitely)
 
+### Real results
+
+We ran AutoEvaluation on an anti-AI writing style guide (the included example) for 20 iterations using Gemini 2.5 Flash:
+
+```
+Iteration   Score    Decision   What the AI changed
+─────────   ─────    ────────   ────────────────────────────────────────────
+baseline    0.9508   —          Starting point
+exp_002     0.9600   KEEP       Strengthened contraction rule with emphasis
+exp_005     0.9692   KEEP       Added concrete em-dash before/after example
+```
+
+18 of 20 attempts were discarded (score didn't improve). The 2 that stuck made targeted, specific changes. Total run time: ~2 hours. Total API cost: <$2.
+
+The full experiment history is in `examples/writing-style/sample-results.tsv`.
+
 ## Quick start
 
 ### Prerequisites
@@ -37,27 +55,42 @@ Point it at a skill, go to bed, wake up with a better prompt.
 - Python 3.10+
 - An API key for your preferred LLM provider (Gemini, OpenAI, or Anthropic)
 
-### Option A: Point at an existing skill (fastest)
+### Try the included example (fastest)
 
-Already have a skill file you want to optimise? Point straight at it:
+The repo ships with a complete working example (a writing style guide). Clone, add your API key, run:
 
 ```bash
 git clone https://github.com/AdenCJM/AutoEvaluation.git
 cd AutoEvaluation
-pip install pyyaml google-genai    # or: openai / anthropic
+pip install pyyaml google-genai    # or: pip install pyyaml openai / anthropic
 
-# Add your API key
+# Add your API key (pick one)
 echo "GEMINI_API_KEY=your-key" > .env
 
-# Run the optimisation loop
-python3 tools/run_loop.py --skill SKILL.md --provider gemini --iterations 10
+# Copy the example into place and run
+cp examples/writing-style/SKILL.md SKILL.md
+cp examples/writing-style/config.yaml config.yaml
+cp examples/writing-style/prompts.json prompts/prompts.json
+cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
+python3 tools/run_loop.py --iterations 5
+```
+
+You'll see the loop analyse weaknesses, modify the skill, and score each iteration. Results land in `results.tsv`.
+
+### Point at your own skill
+
+Already have a skill file you want to optimise? Point straight at it:
+
+```bash
+echo "GEMINI_API_KEY=your-key" > .env
+python3 tools/run_loop.py --skill path/to/your/SKILL.md --provider gemini --iterations 10
 ```
 
 This auto-generates `config.yaml` with sensible defaults (3 evaluation dimensions: human_score, task_accuracy, quality) and starts optimising immediately.
 
 You'll also need test prompts in `prompts/prompts.json` — see [creating test prompts](#test-prompts) below.
 
-### Option B: Setup wizard (guided)
+### Setup wizard (guided)
 
 ```bash
 python3 setup.py
@@ -98,7 +131,7 @@ Open another terminal:
 python3 tools/dashboard_server.py
 ```
 
-Then open http://localhost:8050 in your browser.
+Then open http://localhost:8050 in your browser. See `demo_dashboard.html` for a preview of what the dashboard looks like.
 
 ---
 
