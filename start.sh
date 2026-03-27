@@ -113,15 +113,7 @@ echo ""
 echo "  Dashboard: python3 tools/dashboard_server.py (http://localhost:8050)"
 echo ""
 
-if command -v claude &>/dev/null; then
-  echo "  Mode: Claude Code  (claude -p program.md)"
-  echo "  Stop: Ctrl+C in this terminal"
-  echo ""
-  claude -p program.md
-else
-  echo "  Mode: Headless  (python3 tools/run_loop.py)"
-  echo "  Tip:  Install Claude Code for guided optimisation: npm install -g @anthropic-ai/claude-code"
-  echo "  Stop: Ctrl+C"
-  echo ""
-  python3 tools/run_loop.py
-fi
+echo "  Mode: Headless  (python3 tools/run_loop.py)"
+echo "  Stop: Ctrl+C"
+echo ""
+python3 tools/run_loop.py

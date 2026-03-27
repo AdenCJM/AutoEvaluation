@@ -68,6 +68,8 @@ echo "GEMINI_API_KEY=your-key" > .env
 
 `start.sh` handles everything: creates a virtual environment (works with `uv` or `pip`), installs dependencies, validates your API key, runs setup if needed, and starts the optimisation loop. If anything is wrong — missing key, bad key, missing config — it tells you immediately.
 
+> **Using OpenAI or Anthropic?** The default config uses Gemini. If you're using a different provider, set the matching key in `.env` (e.g. `OPENAI_API_KEY=your-key`) and update the `provider` field in `config.yaml` before running. See [BYO model](#byo-model).
+
 ### Try the included example
 
 The repo ships with a complete working example (a writing style guide):
@@ -80,6 +82,8 @@ cp examples/writing-style/prompts.json prompts/prompts.json
 cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
 ./start.sh
 ```
+
+> **Using OpenAI or Anthropic?** The example `config.yaml` hardcodes Gemini. After copying it, open `config.yaml` and update `provider`, `model`, and `api_key_env` to match your provider. See [BYO model](#byo-model) for the exact values.
 
 ### Point at your own skill
 
@@ -138,7 +142,9 @@ python3 setup.py --skill-file SKILL.md --prompts-file my-prompts.json
 
 ### With Claude Code (autonomous)
 
-If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, it can drive the optimisation loop autonomously:
+The recommended way to run AutoEvaluation is headless via `./start.sh` or `python3 tools/run_loop.py` directly.
+
+If you want Claude Code to drive the loop (making its own hypothesis and strategy decisions), run this from your terminal — not from inside a Claude Code chat session:
 
 ```bash
 python3 setup.py    # or use --defaults
@@ -146,6 +152,8 @@ claude -p program.md
 ```
 
 Claude reads `program.md`, which contains the loop instructions. It autonomously runs experiments, modifies your skill, and tracks results. All bash commands are auto-approved via `.claude/settings.json`.
+
+> **Note:** `claude -p program.md` spawns a new Claude Code process from the terminal. It does not run inside an existing Claude chat. If `claude -p` just prints the file instead of executing it, use the headless path instead: `python3 tools/run_loop.py`.
 
 ### Watch scores in real time
 
