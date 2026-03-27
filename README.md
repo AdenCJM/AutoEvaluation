@@ -4,7 +4,7 @@
 
 Give it a prompt, a set of test scenarios, and a scoring rubric. It runs autonomously: generate outputs, score them, find the weakest metric, rewrite the prompt to fix it, re-score, keep or revert. Hill-climbing on prompt engineering, fully hands-off.
 
-We pointed it at a writing style guide and let it run overnight. It made 20 attempts, kept 2, and improved the composite score from 0.9508 to 0.9692. The changes it made: strengthened contraction rules, added concrete before/after examples for em dash replacement. Every other LLM prompt optimiser (DSPy, TextGrad, MIPRO) requires you to write Python. This one works on plain markdown files.
+I pointed it at a writing style guide and let it run overnight. It made 20 attempts, kept 2, and improved the composite score from 0.9508 to 0.9692. The changes it made: strengthened contraction rules, added concrete before/after examples for em dash replacement. Every other LLM prompt optimiser (DSPy, TextGrad, MIPRO) requires you to write Python. This one works on plain markdown files.
 
 Point it at any LLM instruction set. Go to bed. Wake up with a measurably better prompt.
 
@@ -34,7 +34,7 @@ Point it at any LLM instruction set. Go to bed. Wake up with a measurably better
 
 ### Real results
 
-We ran AutoEvaluation on an anti-AI writing style guide (the included example) for 20 iterations using Gemini 2.5 Flash:
+I ran AutoEvaluation on an anti-AI writing style guide (the included example) for 20 iterations using Gemini 2.5 Flash:
 
 ```
 Iteration   Score    Decision   What the AI changed
