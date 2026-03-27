@@ -7,7 +7,7 @@ Generates: config.yaml, SKILL.md, prompts/prompts.json, .env, .claude/settings.j
 
 Usage:
     python3 setup.py                                    # Full interactive wizard
-    python3 setup.py --defaults                         # Gemini + 10 iters, skip advanced config
+    python3 setup.py --defaults                         # Skip all prompts (Gemini, default rubric, 10 iterations)
     python3 setup.py --skill-file /path/to/SKILL.md     # Point at an existing skill
     python3 setup.py --skill-file SKILL.md --prompts-file prompts.json
 """
@@ -23,23 +23,6 @@ import yaml
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
-
-
-# ---------------------------------------------------------------------------
-# Env helpers
-# ---------------------------------------------------------------------------
-
-def _load_env_file(path: Path) -> dict:
-    """Load key=value pairs from a .env file into a dict."""
-    result = {}
-    if not path.exists():
-        return result
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, _, v = line.partition("=")
-            result[k.strip()] = v.strip()
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -97,96 +80,6 @@ def ask_multiline(prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# API key validation
-# ---------------------------------------------------------------------------
-
-def validate_api_key(provider: str, model: str, api_key_env: str, api_key: str) -> tuple[bool, str]:
-    """Make a tiny test call to confirm the API key works.
-
-    Sets os.environ[api_key_env] before instantiating ModelClient so the
-    client finds the key. Returns (ok, error_message).
-    """
-    os.environ[api_key_env] = api_key
-    try:
-        sys.path.insert(0, str(PROJECT_ROOT / "tools"))
-        from model_client import ModelClient
-        client = ModelClient(provider=provider, model=model, api_key_env=api_key_env)
-        client.generate("You are a test.", "Say ok in one word.")
-        return True, ""
-    except SystemExit:
-        return False, f"ModelClient could not start — is {api_key_env} valid?"
-    except Exception as e:
-        return False, str(e)
-
-
-# ---------------------------------------------------------------------------
-# AI prompt generation
-# ---------------------------------------------------------------------------
-
-def ai_generate_prompts(
-    provider: str,
-    model: str,
-    api_key_env: str,
-    skill_name: str,
-    skill_description: str,
-    skill_content: str,
-) -> list[dict]:
-    """Use the configured LLM to generate 6 test prompts for the skill.
-
-    Returns a list of dicts with keys: id, genre, prompt.
-    Returns empty list on failure (caller falls back to manual entry).
-    """
-    import re as _re
-    import json as _json
-
-    os.environ.setdefault(api_key_env, os.environ.get(api_key_env, ""))
-    try:
-        sys.path.insert(0, str(PROJECT_ROOT / "tools"))
-        from model_client import ModelClient
-        client = ModelClient(provider=provider, model=model, api_key_env=api_key_env)
-
-        system_prompt = (
-            "You are helping set up an LLM evaluation suite. "
-            "Generate test prompts that will be sent to an LLM following the given skill instructions. "
-            "Each prompt should be a realistic task that exercises the skill."
-        )
-        user_prompt = f"""Skill name: {skill_name}
-Skill description: {skill_description}
-
-Skill content:
-{skill_content[:2000]}
-
-Generate 6 diverse test prompts. Return ONLY a JSON array with this exact structure:
-[
-  {{"id": "snake_case_id", "genre": "category", "prompt": "The full prompt text"}},
-  ...
-]
-
-Make the prompts varied — different lengths, tones, edge cases. No markdown, no explanation, just the JSON array."""
-
-        response = client.generate(system_prompt, user_prompt, max_tokens=2048)
-
-        match = _re.search(r'\[.*\]', response, _re.DOTALL)
-        if not match:
-            return []
-        prompts = _json.loads(match.group(0))
-
-        valid = []
-        for i, p in enumerate(prompts):
-            if isinstance(p, dict) and "prompt" in p:
-                valid.append({
-                    "id": p.get("id", f"prompt_{i + 1}"),
-                    "genre": p.get("genre", "general"),
-                    "prompt": p["prompt"],
-                })
-        return valid
-
-    except Exception as e:
-        print(f"  Warning: AI prompt generation failed: {e}", file=sys.stderr)
-        return []
-
-
-# ---------------------------------------------------------------------------
 # Skill file parsing
 # ---------------------------------------------------------------------------
 
@@ -202,6 +95,7 @@ def parse_skill_file(path: Path) -> tuple[str, str, str]:
     """
     content = path.read_text(encoding="utf-8")
 
+    # Try to extract YAML frontmatter
     if content.startswith("---"):
         parts = content.split("---", 2)
         if len(parts) >= 3:
@@ -214,8 +108,41 @@ def parse_skill_file(path: Path) -> tuple[str, str, str]:
             except yaml.YAMLError:
                 pass
 
+    # No valid frontmatter — use filename as name
     name = path.stem.lower().replace("_", "-").replace(" ", "-")
     return name, "", content
+
+
+# ---------------------------------------------------------------------------
+# API key validation
+# ---------------------------------------------------------------------------
+
+def validate_api_key(provider: str, model: str, api_key_env: str, api_key: str) -> bool:
+    """Validate an API key by making a tiny LLM call.
+
+    Sets the env var temporarily, tries a minimal generation,
+    and returns True if it succeeds.
+    """
+    print("\n  Validating API key...", end="", flush=True)
+
+    # Set the env var so ModelClient can find it
+    os.environ[api_key_env] = api_key
+
+    sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+    try:
+        from model_client import ModelClient
+        client = ModelClient(provider=provider, model=model, api_key_env=api_key_env)
+        response = client.generate("Respond with OK.", "Say OK.", max_tokens=8)
+        if response and len(response.strip()) > 0:
+            print(" ✓")
+            return True
+        else:
+            print(" ✗ Empty response")
+            return False
+    except Exception as e:
+        err_name = type(e).__name__
+        print(f" ✗ {err_name}: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +170,17 @@ def step_provider() -> tuple[str, str, str, str]:
     provider, default_model, default_env = provider_map.get(choice, provider_map["1"])
     model = ask("Model name", default_model)
     api_key_env = default_env
-    api_key = ask(f"Your API key (will be saved to .env as {api_key_env})")
+
+    # Loop until we get a valid API key
+    while True:
+        api_key = ask(f"Your API key (will be saved to .env as {api_key_env})")
+        if validate_api_key(provider, model, api_key_env, api_key):
+            break
+        print("  API key validation failed. Please check and try again.")
+        retry = ask("Try again? (y/n)", "y")
+        if retry.lower() != "y":
+            print("  Continuing without validation (key may fail during the run).")
+            break
 
     return provider, model, api_key_env, api_key
 
@@ -278,15 +215,8 @@ def step_skill() -> tuple[str, str, str]:
     return skill_name, skill_description, skill_md
 
 
-def step_prompts(
-    provider: str = "",
-    model: str = "",
-    api_key_env: str = "",
-    skill_name: str = "",
-    skill_description: str = "",
-    skill_content: str = "",
-) -> list[dict]:
-    """Step 3: Test prompts (interactive, with optional AI generation)."""
+def step_prompts() -> list[dict]:
+    """Step 3: Test prompts (interactive)."""
     print("\n" + "=" * 50)
     print("STEP 3: Test Prompts")
     print("=" * 50)
@@ -297,44 +227,6 @@ def step_prompts(
 
     prompts = []
     i = 1
-
-    # Offer AI generation when we have provider info
-    if provider and model and api_key_env and skill_name:
-        use_ai = ask("Generate starter prompts with AI? (y/n)", "y")
-        if use_ai.lower() == "y":
-            print("  Generating prompts...")
-            generated = ai_generate_prompts(
-                provider, model, api_key_env,
-                skill_name, skill_description, skill_content,
-            )
-            if generated:
-                print(f"  ✓ Generated {len(generated)} prompts:\n")
-                for p in generated:
-                    print(f"    [{p['id']}] {p['prompt'][:80]}{'...' if len(p['prompt']) > 80 else ''}")
-                print()
-                accept = ask("Use these? (y / n / edit to add more)", "y")
-                if accept.lower() == "y":
-                    return generated
-                elif accept.lower() == "edit":
-                    prompts = generated
-                    i = len(prompts) + 1
-                    print("\nAdd more prompts. Leave ID blank to finish.")
-                    while True:
-                        print(f"\n--- Prompt {i} ---")
-                        prompt_id = input("Short ID (blank to finish): ").strip()
-                        if not prompt_id:
-                            break
-                        genre = ask("Category/genre", "general")
-                        prompt_text = ask("The prompt itself")
-                        prompts.append({"id": prompt_id, "genre": genre, "prompt": prompt_text})
-                        i += 1
-                    return prompts
-                # n — fall through to manual entry
-                print()
-            else:
-                print("  Falling back to manual entry.\n")
-
-    # Manual entry
     while True:
         print(f"\n--- Prompt {i} ---")
         prompt_id = ask(f"Short ID (e.g. 'formal_email', 'quick_reply')")
@@ -440,6 +332,124 @@ def step_advanced() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# AI Prompt Generator
+# ---------------------------------------------------------------------------
+
+def generate_test_prompts_with_ai(
+    provider: str, model: str, api_key_env: str,
+    skill_name: str, skill_description: str, skill_content: str,
+) -> list[dict]:
+    """Use the configured LLM to generate test prompts from a skill description.
+
+    Asks the AI to generate 5-10 diverse test prompts that exercise
+    different aspects of the skill.
+    """
+    print("\n" + "=" * 50)
+    print("GENERATING TEST PROMPTS WITH AI")
+    print("=" * 50)
+    print(f"  Skill: {skill_name}")
+    print(f"  Description: {skill_description}")
+    print()
+    print("  Generating diverse test scenarios...", end="", flush=True)
+
+    sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+    from model_client import ModelClient
+    client = ModelClient(provider=provider, model=model, api_key_env=api_key_env)
+
+    system_prompt = """You are a test scenario designer for LLM skill evaluation.
+
+Given a skill file (instructions that tell an LLM how to behave), generate 5-10 diverse test prompts
+that would thoroughly exercise the skill across different situations.
+
+Each prompt should:
+- Be a realistic task a user might actually ask
+- Test a different aspect or edge case of the skill
+- Vary in length, complexity, and style
+- Include at least one that tests boundary conditions
+
+Respond with ONLY a valid JSON array. No markdown, no explanation. Each entry must have exactly these keys:
+{"id": "short_snake_case_id", "genre": "category", "prompt": "the actual test prompt"}
+
+Example format:
+[
+  {"id": "formal_email", "genre": "email", "prompt": "Write a formal email to a client about a project delay."},
+  {"id": "casual_slack", "genre": "messaging", "prompt": "Write a casual Slack message updating your team on progress."}
+]"""
+
+    user_prompt = f"""Here is the skill to generate test prompts for:
+
+Skill name: {skill_name}
+Description: {skill_description}
+
+Skill instructions:
+{skill_content}
+
+Generate 5-10 diverse test prompts that would thoroughly evaluate this skill. Return ONLY the JSON array."""
+
+    try:
+        response = client.generate(system_prompt, user_prompt, max_tokens=2048)
+        print(" ✓")
+
+        # Extract JSON from response (handle markdown code blocks)
+        json_text = response.strip()
+        if json_text.startswith("```"):
+            # Strip markdown code block
+            lines = json_text.split("\n")
+            json_lines = []
+            in_block = False
+            for line in lines:
+                if line.strip().startswith("```"):
+                    in_block = not in_block
+                    continue
+                if in_block or not line.strip().startswith("```"):
+                    json_lines.append(line)
+            json_text = "\n".join(json_lines)
+
+        # Try to find a JSON array in the response
+        start_idx = json_text.find("[")
+        end_idx = json_text.rfind("]")
+        if start_idx >= 0 and end_idx > start_idx:
+            json_text = json_text[start_idx:end_idx + 1]
+
+        prompts = json.loads(json_text)
+
+        if not isinstance(prompts, list) or not prompts:
+            raise ValueError("Expected a non-empty JSON array")
+
+        # Validate and backfill
+        valid_prompts = []
+        for i, p in enumerate(prompts):
+            if not isinstance(p, dict) or "prompt" not in p:
+                continue
+            p.setdefault("id", f"prompt_{i + 1}")
+            p.setdefault("genre", "general")
+            valid_prompts.append(p)
+
+        if not valid_prompts:
+            raise ValueError("No valid prompts in response")
+
+        print(f"\n  Generated {len(valid_prompts)} test prompts:")
+        for p in valid_prompts:
+            print(f"    · [{p['id']}] ({p['genre']}) {p['prompt'][:70]}{'...' if len(p['prompt']) > 70 else ''}")
+
+        print()
+        use_them = ask("Use these prompts? (y = yes, n = enter manually, r = regenerate)", "y")
+        if use_them.lower() == "r":
+            return generate_test_prompts_with_ai(
+                provider, model, api_key_env, skill_name, skill_description, skill_content
+            )
+        elif use_them.lower() == "y":
+            return valid_prompts
+        else:
+            return None  # Fall through to manual entry
+
+    except Exception as e:
+        print(f" ✗ {type(e).__name__}: {e}")
+        print("  Falling back to manual prompt entry.")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 
@@ -470,6 +480,35 @@ def _default_dimensions() -> list[dict]:
             ),
         },
     ]
+
+
+_DEFAULT_PROMPTS = [
+    {
+        "id": "task_1",
+        "genre": "general",
+        "prompt": "Write a short paragraph explaining what you do and why it matters.",
+    },
+    {
+        "id": "task_2",
+        "genre": "general",
+        "prompt": "Write a brief email to a colleague summarising the key takeaways from a meeting.",
+    },
+    {
+        "id": "task_3",
+        "genre": "general",
+        "prompt": "Draft a one-paragraph product description for a new feature aimed at technical users.",
+    },
+    {
+        "id": "task_4",
+        "genre": "general",
+        "prompt": "Write a short Slack message to your team announcing a timeline change.",
+    },
+    {
+        "id": "task_5",
+        "genre": "general",
+        "prompt": "Write a two-paragraph blog post intro about how your team solved a recent challenge.",
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +601,7 @@ def write_files(
 
 
 # ---------------------------------------------------------------------------
-# Main: two modes — quick (with flags) or interactive (wizard)
+# Main: three modes — defaults (no prompts), quick (with flags), or interactive
 # ---------------------------------------------------------------------------
 
 def main():
@@ -572,10 +611,23 @@ def main():
         epilog="""
 Examples:
   python3 setup.py                                    # Full interactive wizard
-  python3 setup.py --defaults                         # Gemini + 10 iters, skip advanced config
+  python3 setup.py --defaults                         # Skip all prompts (Gemini, defaults, 10 iterations)
+  python3 setup.py --defaults --provider openai       # Defaults but use OpenAI
   python3 setup.py --skill-file /path/to/SKILL.md     # Point at an existing skill
   python3 setup.py --skill-file SKILL.md --prompts-file prompts.json
         """,
+    )
+    parser.add_argument(
+        "--defaults",
+        action="store_true",
+        help="Skip all interactive prompts. Uses Gemini, 3 default rubric dimensions, "
+             "5 default test prompts, 10 iterations. Requires API key in .env or environment.",
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        choices=["gemini", "openai", "anthropic"],
+        help="Provider to use with --defaults (default: gemini).",
     )
     parser.add_argument(
         "--skill-file",
@@ -588,9 +640,9 @@ Examples:
         help="Path to an existing prompts JSON file. Skips the prompt entry step.",
     )
     parser.add_argument(
-        "--defaults",
+        "--generate-prompts",
         action="store_true",
-        help="Skip steps 4-6 and use defaults: Gemini/gemini-2.5-flash, 3 rubric dimensions, 10 iterations.",
+        help="Use AI to generate test prompts from the skill file (requires --skill-file).",
     )
     args = parser.parse_args()
 
@@ -611,6 +663,7 @@ Examples:
             for i, p in enumerate(prompts_data):
                 if not isinstance(p, dict) or "prompt" not in p:
                     raise ValueError(f"Entry {i} must be an object with at least a 'prompt' key")
+                # Backfill missing id/genre so downstream tools don't break
                 if "id" not in p:
                     p["id"] = f"prompt_{i}"
                 if "genre" not in p:
@@ -618,6 +671,95 @@ Examples:
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Error: Invalid prompts file: {e}", file=sys.stderr)
             sys.exit(1)
+
+    # =====================================================================
+    # --defaults mode: skip all interactive prompts
+    # =====================================================================
+    if args.defaults:
+        provider_choice = args.provider or "gemini"
+        provider_map = {
+            "gemini": ("gemini", "gemini-2.5-flash", "GEMINI_API_KEY"),
+            "openai": ("openai", "gpt-4o", "OPENAI_API_KEY"),
+            "anthropic": ("anthropic", "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
+        }
+        provider, model, api_key_env = provider_map[provider_choice]
+
+        # Load API key from .env or environment
+        env_path = PROJECT_ROOT / ".env"
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip())
+
+        api_key = os.environ.get(api_key_env, "")
+        if not api_key:
+            print(f"Error: --defaults requires {api_key_env} in .env or environment.", file=sys.stderr)
+            print(f"  echo \"{api_key_env}=your-key\" > .env", file=sys.stderr)
+            sys.exit(1)
+
+        # Validate the API key
+        if not validate_api_key(provider, model, api_key_env, api_key):
+            print(f"Error: API key validation failed. Check your {api_key_env}.", file=sys.stderr)
+            sys.exit(1)
+
+        # Skill
+        if args.skill_file:
+            dest = PROJECT_ROOT / "SKILL.md"
+            if args.skill_file.resolve() != dest.resolve():
+                shutil.copy2(args.skill_file, dest)
+            skill_content = None
+        else:
+            skill_content = None  # Keep existing SKILL.md or placeholder
+
+        # Prompts
+        if args.prompts_file:
+            prompts_dir = PROJECT_ROOT / "prompts"
+            prompts_dir.mkdir(exist_ok=True)
+            dest = prompts_dir / "prompts.json"
+            if args.prompts_file.resolve() != dest.resolve():
+                shutil.copy2(args.prompts_file, dest)
+            prompts = None
+        elif args.generate_prompts and args.skill_file:
+            skill_name, skill_desc, skill_text = parse_skill_file(args.skill_file)
+            prompts = generate_test_prompts_with_ai(
+                provider, model, api_key_env, skill_name, skill_desc, skill_text
+            )
+            if prompts is None:
+                prompts = _DEFAULT_PROMPTS
+        else:
+            prompts = _DEFAULT_PROMPTS
+
+        print("\n" + "=" * 50)
+        print("SETUP (--defaults)")
+        print("=" * 50)
+        print(f"  Provider:    {provider} ({model})")
+        print(f"  Rubric:      3 default dimensions")
+        print(f"  Prompts:     {len(prompts) if prompts else 'existing'}")
+        print(f"  Iterations:  10")
+
+        print("\n" + "=" * 50)
+        print("WRITING FILES")
+        print("=" * 50)
+
+        write_files(
+            provider, model, api_key_env, api_key,
+            skill_content, "SKILL.md",
+            prompts, _default_dimensions(), 10, 0,
+        )
+
+        print("\n" + "=" * 50)
+        print("  SETUP COMPLETE!")
+        print("=" * 50)
+        print()
+        print("  Start: ./start.sh  or  python3 tools/run_loop.py")
+        print()
+        return
+
+    # =====================================================================
+    # Interactive mode
+    # =====================================================================
 
     # --- Header ---
     print("=" * 50)
@@ -634,63 +776,29 @@ Examples:
     if args.prompts_file:
         print(f"  Prompts file: {args.prompts_file} ({len(prompts_data)} prompts)")
 
-    if args.defaults:
-        print("\n  Mode: --defaults  (Gemini · 10 iterations · default rubric)")
-
     print()
 
-    # --- Step 1: Provider ---
-    if args.defaults:
-        provider = "gemini"
-        model = "gemini-2.5-flash"
-        api_key_env = "GEMINI_API_KEY"
-
-        # Check env / .env before prompting
-        env_vars = _load_env_file(PROJECT_ROOT / ".env")
-        api_key = os.environ.get(api_key_env) or env_vars.get(api_key_env, "")
-        if not api_key:
-            import getpass
-            api_key = getpass.getpass(f"  {api_key_env} not found. Enter your API key: ").strip()
-            if not api_key:
-                print("  Error: API key required.", file=sys.stderr)
-                sys.exit(1)
-
-        print(f"  Validating API key...")
-        ok, err = validate_api_key(provider, model, api_key_env, api_key)
-        if not ok:
-            print(f"  Error: API key validation failed: {err}", file=sys.stderr)
-            sys.exit(1)
-        print(f"  ✓ API key valid\n")
-    else:
-        provider, model, api_key_env, api_key = step_provider()
-
-        print(f"\n  Validating API key...")
-        ok, err = validate_api_key(provider, model, api_key_env, api_key)
-        if not ok:
-            print(f"  Error: API key validation failed: {err}", file=sys.stderr)
-            sys.exit(1)
-        print(f"  ✓ API key valid")
+    # --- Step 1: Provider (always interactive) ---
+    provider, model, api_key_env, api_key = step_provider()
 
     # --- Step 2: Skill ---
-    skill_name_for_prompts = ""
-    skill_desc_for_prompts = ""
-    skill_content_for_prompts = ""
-
     if args.skill_file:
+        # Copy the skill file into the project root as SKILL.md
         dest = PROJECT_ROOT / "SKILL.md"
         if args.skill_file.resolve() != dest.resolve():
             shutil.copy2(args.skill_file, dest)
             print(f"\n  Copied {args.skill_file} -> SKILL.md")
         skill_content = None  # Don't overwrite in write_files
         skill_path_config = "SKILL.md"
-        skill_name_for_prompts, skill_desc_for_prompts, skill_content_for_prompts = parse_skill_file(args.skill_file)
+        skill_name, skill_desc, skill_text = parse_skill_file(args.skill_file)
     else:
-        skill_name_for_prompts, skill_desc_for_prompts, skill_content = step_skill()
-        skill_content_for_prompts = skill_content
+        skill_name, skill_desc, skill_content = step_skill()
         skill_path_config = "SKILL.md"
+        skill_text = skill_content
 
     # --- Step 3: Prompts ---
     if args.prompts_file:
+        # Copy the prompts file into prompts/prompts.json
         prompts_dir = PROJECT_ROOT / "prompts"
         prompts_dir.mkdir(exist_ok=True)
         dest = prompts_dir / "prompts.json"
@@ -699,30 +807,38 @@ Examples:
             print(f"  Copied {args.prompts_file} -> prompts/prompts.json")
         prompts = None  # Don't overwrite in write_files
     else:
-        prompts = step_prompts(
-            provider=provider,
-            model=model,
-            api_key_env=api_key_env,
-            skill_name=skill_name_for_prompts,
-            skill_description=skill_desc_for_prompts,
-            skill_content=skill_content_for_prompts,
-        )
+        # Offer AI prompt generation
+        print("\n" + "=" * 50)
+        print("STEP 3: Test Prompts")
+        print("=" * 50)
+        print("AutoEvaluation needs test prompts — realistic tasks that exercise your skill.")
+        print()
+        print("Options:")
+        print("  1. Generate prompts with AI (recommended — uses your skill to create test scenarios)")
+        print("  2. Enter prompts manually")
+        print()
+        prompt_choice = ask("Choose 1 or 2", "1")
 
-    # --- Steps 4-6: Rubric / Duration / Advanced ---
-    if args.defaults:
-        dimensions = _default_dimensions()
-        max_iterations = 10
-        max_hours = 0.0
-        advanced = {
-            "judge_sees_skill": False,
-            "convergence_window": 0,
-            "max_cost_usd": 0.0,
-            "max_concurrent": 1,
-        }
-    else:
-        dimensions = step_eval_rubric()
-        max_iterations, max_hours = step_duration()
-        advanced = step_advanced()
+        if prompt_choice == "1":
+            prompts = generate_test_prompts_with_ai(
+                provider, model, api_key_env,
+                skill_name, skill_desc or "No description provided",
+                skill_text or skill_content or "",
+            )
+            if prompts is None:
+                # Fallback to manual if AI generation didn't work or user declined
+                prompts = step_prompts()
+        else:
+            prompts = step_prompts()
+
+    # --- Step 4: Eval rubric ---
+    dimensions = step_eval_rubric()
+
+    # --- Step 5: Duration ---
+    max_iterations, max_hours = step_duration()
+
+    # --- Step 6: Advanced ---
+    advanced = step_advanced()
 
     # --- Write files ---
     print("\n" + "=" * 50)
@@ -744,13 +860,14 @@ Examples:
     print()
     print("  Start the optimisation loop:")
     print()
-    print("     claude -p program.md")
+    print("     ./start.sh")
     print()
-    print("  Or run headless (without Claude Code):")
+    print("  Or run directly:")
     print()
-    print("     python3 tools/run_loop.py")
+    print("     claude -p program.md      # with Claude Code")
+    print("     python3 tools/run_loop.py  # headless")
     print()
-    print("  To watch scores in real time:")
+    print("  Watch scores in real time:")
     print("     python3 tools/dashboard_server.py")
     print()
 

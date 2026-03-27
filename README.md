@@ -57,55 +57,77 @@ The full experiment history is in `examples/writing-style/sample-results.tsv`.
 - Python 3.10+
 - An API key for your preferred LLM provider (Gemini, OpenAI, or Anthropic)
 
-### Try the included example (fastest)
-
-The repo ships with a complete working example (a writing style guide). Clone, add your API key, run:
+### One command start
 
 ```bash
 git clone https://github.com/AdenCJM/AutoEvaluation.git
 cd AutoEvaluation
-pip install pyyaml google-genai    # or: pip install pyyaml openai / anthropic
-
-# Add your API key (pick one)
 echo "GEMINI_API_KEY=your-key" > .env
+./start.sh
+```
 
-# Copy the example into place and run
+`start.sh` handles everything: creates a virtual environment (works with `uv` or `pip`), installs dependencies, validates your API key, runs setup if needed, and starts the optimisation loop. If anything is wrong — missing key, bad key, missing config — it tells you immediately.
+
+### Try the included example
+
+The repo ships with a complete working example (a writing style guide):
+
+```bash
+echo "GEMINI_API_KEY=your-key" > .env
 cp examples/writing-style/SKILL.md SKILL.md
 cp examples/writing-style/config.yaml config.yaml
 cp examples/writing-style/prompts.json prompts/prompts.json
 cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
-python3 tools/run_loop.py --iterations 5
+./start.sh
 ```
-
-You'll see the loop analyse weaknesses, modify the skill, and score each iteration. Results land in `results.tsv`.
 
 ### Point at your own skill
 
-Already have a skill file you want to optimise? Point straight at it:
+Already have a skill file you want to optimise? Two options:
 
+**Quick (no prompts, all defaults):**
 ```bash
 echo "GEMINI_API_KEY=your-key" > .env
+python3 setup.py --defaults --skill-file /path/to/your/SKILL.md --generate-prompts
+./start.sh
+```
+
+This validates your API key, uses AI to generate test prompts from your skill file, applies sensible defaults (3 evaluation dimensions, 10 iterations), and you're running.
+
+**Guided (interactive wizard):**
+```bash
 python3 tools/run_loop.py --skill path/to/your/SKILL.md --provider gemini --iterations 10
 ```
 
-This auto-generates `config.yaml` with sensible defaults (3 evaluation dimensions: human_score, task_accuracy, quality) and starts optimising immediately.
+This auto-generates `config.yaml` with sensible defaults and starts optimising immediately.
 
-You'll also need test prompts in `prompts/prompts.json` — see [creating test prompts](#test-prompts) below.
-
-### Setup wizard (guided)
+### Setup wizard
 
 ```bash
 python3 setup.py
 ```
 
 The wizard walks you through:
-1. **Provider + model** — pick Gemini, OpenAI, or Anthropic
+1. **Provider + model** — pick Gemini, OpenAI, or Anthropic (API key validated instantly)
 2. **Your skill** — paste or describe the instructions you want to optimise
-3. **Test prompts** — define realistic scenarios to evaluate against
+3. **Test prompts** — AI generates prompts from your skill description, or enter manually
 4. **Eval rubric** — set 2-5 quality dimensions (or use the defaults)
 5. **Run duration** — max iterations, max hours, or unlimited
 
 It generates: `config.yaml`, `SKILL.md`, `prompts/prompts.json`, `.env`, and `.claude/settings.json`.
+
+**Skip all prompts:**
+
+```bash
+# All defaults — Gemini, default rubric, 5 generic prompts, 10 iterations
+python3 setup.py --defaults
+
+# Defaults with a custom skill and AI-generated prompts
+python3 setup.py --defaults --skill-file SKILL.md --generate-prompts
+
+# Defaults with OpenAI instead of Gemini
+python3 setup.py --defaults --provider openai
+```
 
 **Already have a skill file?** Skip the paste step:
 
@@ -114,12 +136,12 @@ python3 setup.py --skill-file /path/to/your/SKILL.md
 python3 setup.py --skill-file SKILL.md --prompts-file my-prompts.json
 ```
 
-### Option C: With Claude Code (autonomous)
+### With Claude Code (autonomous)
 
 If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, it can drive the optimisation loop autonomously:
 
 ```bash
-python3 setup.py    # or use --skill-file
+python3 setup.py    # or use --defaults
 claude -p program.md
 ```
 
