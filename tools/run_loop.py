@@ -174,7 +174,7 @@ Analyse the weakest metrics, hypothesise why they're weak, and make ONE targeted
 
 def update_decision(results_tsv: Path, decision: str):
     """Update the decision column of the last row in results.tsv."""
-    lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
+    lines = results_tsv.read_text(encoding="utf-8").rstrip("\n").split("\n")
     if len(lines) > 1:
         last = lines[-1]
         if last.endswith("\t"):
@@ -214,6 +214,23 @@ def _write_status(
     }
     status_path = PROJECT_ROOT / ".tmp" / "run_status.json"
     status_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _get_skill_name(skill_best: Path) -> str | None:
+    """Read the name field from SKILL.md.best YAML frontmatter."""
+    if not skill_best.exists():
+        return None
+    text = skill_best.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return None
+    end = text.find("---", 3)
+    if end == -1:
+        return None
+    frontmatter = text[3:end]
+    for line in frontmatter.splitlines():
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip()
+    return None
 
 
 def print_run_summary(results_tsv: Path, start_time: float, client, iterations_run: int):
@@ -271,8 +288,23 @@ def print_run_summary(results_tsv: Path, start_time: float, client, iterations_r
         output_lines.append(f"  Kept changes ({len(kept_changes)}):")
         output_lines.extend(kept_changes)
         output_lines.append("")
+    skill_best = PROJECT_ROOT / "SKILL.md.best"
+    skill_name = _get_skill_name(skill_best)
+    if skill_name:
+        global_skill = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
+        if global_skill.exists():
+            deploy_hint = f"  To deploy:        cp SKILL.md.best {global_skill}"
+        else:
+            deploy_hint = f"  To install:       mkdir -p ~/.claude/skills/{skill_name} && cp SKILL.md.best ~/.claude/skills/{skill_name}/SKILL.md"
+    else:
+        deploy_hint = None
+
     output_lines += [
         f"  Best skill saved: SKILL.md.best",
+    ]
+    if deploy_hint:
+        output_lines.append(deploy_hint)
+    output_lines += [
         "=" * 60,
         "",
     ]
@@ -305,6 +337,12 @@ def print_run_summary(results_tsv: Path, start_time: float, client, iterations_r
             md_lines.append(c.strip().replace("·", "-"))
         md_lines.append("")
     md_lines.append("Best skill file: `SKILL.md.best`")
+    if skill_name:
+        global_skill = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
+        if global_skill.exists():
+            md_lines.append(f"\nTo deploy: `cp SKILL.md.best {global_skill}`")
+        else:
+            md_lines.append(f"\nTo install: `mkdir -p ~/.claude/skills/{skill_name} && cp SKILL.md.best ~/.claude/skills/{skill_name}/SKILL.md`")
 
     (PROJECT_ROOT / ".tmp" / "run-summary.md").write_text(
         "\n".join(md_lines), encoding="utf-8"

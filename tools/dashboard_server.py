@@ -33,7 +33,7 @@ def load_config():
     """Load config.yaml and extract metric info."""
     cfg_path = PROJECT_ROOT / "config.yaml"
     if not cfg_path.exists():
-        return {"metric_names": [], "metric_labels": {}, "metric_directions": {}}
+        return {"metric_names": [], "metric_labels": {}, "metric_directions": {}, "skill_name": ""}
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
     names = []
@@ -48,7 +48,23 @@ def load_config():
         labels[m["name"]] = m["name"].replace("_", " ").title()
         directions[m["name"]] = m.get("direction", "higher_is_better")
 
-    return {"metric_names": names, "metric_labels": labels, "metric_directions": directions}
+    # Extract skill name from SKILL.md frontmatter or config
+    skill_name = ""
+    skill_path = PROJECT_ROOT / cfg.get("skill_path", "SKILL.md")
+    if skill_path.exists():
+        content = skill_path.read_text(encoding="utf-8")
+        if content.startswith("---"):
+            try:
+                fm_end = content.index("---", 3)
+                fm = yaml.safe_load(content[3:fm_end])
+                if isinstance(fm, dict):
+                    skill_name = fm.get("name", "")
+            except (ValueError, yaml.YAMLError):
+                pass
+    if skill_name:
+        skill_name = skill_name.replace("-", " ").replace("_", " ").title()
+
+    return {"metric_names": names, "metric_labels": labels, "metric_directions": directions, "skill_name": skill_name}
 
 
 def read_tsv(tsv_path: str, metric_config: dict) -> dict:
@@ -104,6 +120,7 @@ def read_tsv(tsv_path: str, metric_config: dict) -> dict:
         "metric_names": metric_names,
         "metric_labels": labels,
         "metric_directions": metric_config.get("metric_directions", {}),
+        "skill_name": metric_config.get("skill_name", ""),
     }
 
 
@@ -629,7 +646,7 @@ tr:hover td { background: var(--bg-card-hover); }
 <div class="header">
     <div class="header-left">
         <h1>AutoEvaluation</h1>
-        <div class="subtitle">Autonomous Skill Optimisation</div>
+        <div class="subtitle" id="hdr-subtitle">Autonomous Skill Optimisation</div>
     </div>
     <div style="display:flex;align-items:center;gap:16px;">
     <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#9680;</button>
@@ -693,7 +710,7 @@ tr:hover td { background: var(--bg-card-hover); }
             <div class="elapsed-left">
                 <div class="elapsed-icon">&#9202;</div>
                 <div>
-                    <div class="elapsed-label">Elapsed Time</div>
+                    <div class="elapsed-label">Total Elapsed Time</div>
                     <div class="elapsed-value" id="elapsedValue">&mdash;</div>
                 </div>
             </div>
@@ -789,7 +806,9 @@ function toggleTheme() {
 }
 (function() {
     const saved = localStorage.getItem("ae-theme");
-    if (saved) document.documentElement.setAttribute("data-theme", saved);
+    // Default to light theme to match design spec
+    const theme = saved !== null ? saved : "light";
+    if (theme) document.documentElement.setAttribute("data-theme", theme);
 })();
 
 const POLL_MS = 10000;
@@ -863,6 +882,12 @@ function updateElapsed(data) {
 function updateHeader(data) {
     document.getElementById("hdr-runs").textContent = data.runs.length;
 
+    // Update subtitle with skill name if available
+    if (data.skill_name) {
+        document.getElementById("hdr-subtitle").textContent =
+            "Autonomous Skill Optimisation \u2014 " + data.skill_name;
+    }
+
     if (data.best) {
         document.getElementById("hdr-best").textContent = pctInt(data.best.composite_score);
         document.getElementById("hdr-best-run").textContent = data.best.run_id;
@@ -878,8 +903,10 @@ function updateHeader(data) {
         }
     }
 
-    const keeps = data.runs.filter(r => r.decision.toLowerCase() === "keep").length;
-    const total = data.runs.filter(r => r.decision && r.decision.toLowerCase() !== "baseline").length;
+    // Fallback: use change_description if decision is null (legacy data)
+    const getDecision = r => (r.decision || r.change_description || '').toLowerCase();
+    const keeps = data.runs.filter(r => getDecision(r) === "keep").length;
+    const total = data.runs.filter(r => { const d = getDecision(r); return d && d !== "baseline"; }).length;
     if (total > 0) {
         document.getElementById("hdr-keep-rate").textContent =
             keeps + "/" + total + " kept (" + Math.round(keeps/total*100) + "%)";
@@ -887,11 +914,15 @@ function updateHeader(data) {
 }
 
 function getPointColors(runs) {
+    const cs = getComputedStyle(document.documentElement);
+    const green = cs.getPropertyValue('--green').trim();
+    const red = cs.getPropertyValue('--red').trim();
+    const muted = cs.getPropertyValue('--text-muted').trim();
     return runs.map(r => {
-        const d = (r.decision || '').toLowerCase();
-        if (d === "keep" || d === "baseline") return getComputedStyle(document.documentElement).getPropertyValue('--green').trim();
-        if (d === "discard") return getComputedStyle(document.documentElement).getPropertyValue('--red').trim();
-        return getComputedStyle(document.documentElement).getPropertyValue('--text-muted').trim();
+        const d = (r.decision || r.change_description || '').toLowerCase();
+        if (d === "keep" || d === "baseline") return green;
+        if (d === "discard") return red;
+        return muted;
     });
 }
 
@@ -1123,7 +1154,8 @@ function updateRadarChart(data) {
 
 function updateChangeLog(data) {
     const log = document.getElementById("changeLog");
-    const keeps = data.runs.filter(r => (r.decision || '').toLowerCase() === "keep" && r.change_description);
+    const getDecision = r => (r.decision || r.change_description || '').toLowerCase();
+    const keeps = data.runs.filter(r => getDecision(r) === "keep");
 
     if (keeps.length === 0) {
         log.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)">No improvements yet</div>';
@@ -1157,7 +1189,7 @@ function updateHistoryTable(data) {
     const rows = [...data.runs].reverse();
 
     tbody.innerHTML = rows.map((r, i) => {
-        const dc = (r.decision || '').toLowerCase();
+        const dc = (r.decision || r.change_description || '').toLowerCase();
         const badgeClass = dc === "keep" ? "keep" : dc === "discard" ? "discard" : "baseline";
         const nextRun = i < rows.length - 1 ? rows[i + 1] : null;
         const delta = nextRun ? r.composite_score - nextRun.composite_score : 0;

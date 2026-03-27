@@ -1,12 +1,52 @@
 [
   {
-    "id": "example_task_1",
-    "genre": "general",
-    "prompt": "Write a short paragraph explaining what you do and why it matters."
+    "id": "email_internal",
+    "genre": "internal email",
+    "prompt": "Write a 400-500 word email to the engineering team explaining why the product launch is being delayed by two weeks and what the revised timeline looks like."
   },
   {
-    "id": "example_task_2",
-    "genre": "general",
-    "prompt": "Write a brief email to a colleague summarising the key takeaways from a meeting."
+    "id": "blog_technical",
+    "genre": "technical blog post",
+    "prompt": "Write a 400-500 word blog post explaining how API rate limiting works and why it matters for application reliability."
+  },
+  {
+    "id": "slack_update",
+    "genre": "Slack message",
+    "prompt": "Write a 150-200 word Slack message updating the team on a project that hit a major blocker this week, what you tried, and what the plan is now."
+  },
+  {
+    "id": "report_exec",
+    "genre": "executive summary",
+    "prompt": "Write a 400-500 word executive summary of a quarterly review for a B2B SaaS company that grew revenue 15% but saw churn increase."
+  },
+  {
+    "id": "proposal_brief",
+    "genre": "project proposal",
+    "prompt": "Write a 400-500 word proposal for building an internal tool that automates weekly reporting from three data sources into a single dashboard."
+  },
+  {
+    "id": "explainer_nontechnical",
+    "genre": "non-technical explainer",
+    "prompt": "Write a 400-500 word explanation of blockchain for someone who has never heard of it, aimed at a general business audience."
+  },
+  {
+    "id": "opinion_piece",
+    "genre": "opinion/argument",
+    "prompt": "Write a 400-500 word argument for why remote work is better than hybrid for knowledge workers. Take a clear position."
+  },
+  {
+    "id": "incident_postmortem",
+    "genre": "incident report",
+    "prompt": "Write a 400-500 word post-mortem for a production outage caused by a database migration that took the site down for 45 minutes."
+  },
+  {
+    "id": "newsletter_intro",
+    "genre": "newsletter",
+    "prompt": "Write a 300-400 word introduction to a company newsletter covering three topics: a new product feature, a team offsite, and an upcoming industry conference."
+  },
+  {
+    "id": "documentation_howto",
+    "genre": "technical documentation",
+    "prompt": "Write a 400-500 word how-to guide for setting up a new development environment, including prerequisites, installation steps, and verification."
   }
 ]
