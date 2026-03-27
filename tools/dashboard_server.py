@@ -1207,7 +1207,7 @@ function updateHistoryTable(data) {
     }).join("");
 }
 
-function formatDuration(seconds) {
+function formatDurationSecs(seconds) {
     if (!seconds || seconds <= 0) return "\u2014";
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -1228,7 +1228,7 @@ function updateRunProgress(data) {
     const pct = max > 0 ? Math.min(100, Math.round((cur / max) * 100)) : 0;
     document.getElementById("runProgressBar").style.width = pct + "%";
     document.getElementById("runProgressIter").textContent = max > 0 ? cur + "/" + max : cur;
-    document.getElementById("runProgressEta").textContent = formatDuration(rs.eta_seconds);
+    document.getElementById("runProgressEta").textContent = formatDurationSecs(rs.eta_seconds);
     document.getElementById("runProgressCost").textContent = rs.cost_usd != null ? "$" + rs.cost_usd.toFixed(3) : "\u2014";
 }
 
