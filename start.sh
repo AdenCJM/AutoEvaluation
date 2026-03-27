@@ -107,7 +107,17 @@ PYEOF
 
 echo ""
 
-# ── 6. Start the optimisation loop ──────────────────────────────
+# ── 6. Install /autoeval skill ───────────────────────────────────
+SKILL_SRC=".claude/skills/autoeval/SKILL.md"
+SKILL_DEST="$HOME/.claude/skills/autoeval/SKILL.md"
+if [ -f "$SKILL_SRC" ] && [ ! -f "$SKILL_DEST" ]; then
+  mkdir -p "$HOME/.claude/skills/autoeval"
+  cp "$SKILL_SRC" "$SKILL_DEST"
+  echo "  ✓ /autoeval skill installed (type /autoeval in Claude Code to start a run)"
+  echo ""
+fi
+
+# ── 7. Start the optimisation loop ──────────────────────────────
 echo "Starting optimisation loop..."
 echo ""
 echo "  Dashboard: python3 tools/dashboard_server.py (http://localhost:8050)"

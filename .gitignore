@@ -17,7 +17,7 @@ venv/
 .pytest_cache/
 
 # Claude Code / gstack
-.claude/
+.claude/settings.json
 .gstack/
 
 # OS / IDE
