@@ -20,6 +20,7 @@ import re
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -176,7 +177,6 @@ def update_decision(results_tsv: Path, decision: str):
     lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
     if len(lines) > 1:
         last = lines[-1]
-        # Replace empty decision at end of line
         if last.endswith("\t"):
             lines[-1] = last + decision
         else:
@@ -184,6 +184,132 @@ def update_decision(results_tsv: Path, decision: str):
             parts[-1] = decision
             lines[-1] = "\t".join(parts)
         results_tsv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_status(
+    status: str,
+    run_id: str,
+    iteration: int,
+    max_iterations: int,
+    start_time: float,
+    iter_times: list,
+    client,
+):
+    """Write .tmp/run_status.json so the dashboard can show live progress."""
+    tmp_dir = PROJECT_ROOT / ".tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    avg_secs = sum(iter_times) / len(iter_times) if iter_times else 0
+    remaining_iters = max(0, max_iterations - iteration) if max_iterations else 0
+    eta_seconds = avg_secs * remaining_iters if avg_secs and remaining_iters else 0
+    payload = {
+        "status": status,
+        "current_iteration": iteration,
+        "max_iterations": max_iterations or 0,
+        "start_time_iso": datetime.fromtimestamp(start_time).isoformat(),
+        "avg_iteration_seconds": round(avg_secs, 1),
+        "eta_seconds": round(eta_seconds),
+        "cost_usd": round(client.estimated_cost_usd, 4),
+        "last_updated_iso": datetime.now().isoformat(),
+        "current_run_id": run_id,
+    }
+    status_path = PROJECT_ROOT / ".tmp" / "run_status.json"
+    status_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def print_run_summary(results_tsv: Path, start_time: float, client, iterations_run: int):
+    """Print an end-of-run summary and write .tmp/run-summary.md."""
+    elapsed = time.time() - start_time
+    elapsed_h = int(elapsed // 3600)
+    elapsed_m = int((elapsed % 3600) // 60)
+    elapsed_s = int(elapsed % 60)
+    elapsed_str = f"{elapsed_h}h {elapsed_m}m {elapsed_s}s" if elapsed_h else f"{elapsed_m}m {elapsed_s}s"
+
+    usage = client.usage_summary()
+    best_score = get_best_score(results_tsv)
+
+    # Parse results for baseline score and kept changes
+    baseline_score = 0.0
+    kept_changes = []
+    if results_tsv.exists():
+        lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
+        header = lines[0].split("\t") if lines else []
+        desc_idx = header.index("change_description") if "change_description" in header else -1
+        for line in lines[1:]:
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            run_id_col = parts[0]
+            try:
+                score = float(parts[2])
+            except ValueError:
+                continue
+            decision = parts[-1].strip() if parts else ""
+            if run_id_col == "baseline":
+                baseline_score = score
+            if decision == "KEEP":
+                desc = parts[desc_idx].strip() if desc_idx >= 0 and desc_idx < len(parts) else run_id_col
+                kept_changes.append(f"  · [{run_id_col}] {desc[:80]}")
+
+    improvement = best_score - baseline_score
+    improvement_str = f"+{improvement:.4f}" if improvement >= 0 else f"{improvement:.4f}"
+
+    output_lines = [
+        "",
+        "=" * 60,
+        "  RUN COMPLETE",
+        "=" * 60,
+        f"  Iterations run:   {iterations_run}",
+        f"  Time elapsed:     {elapsed_str}",
+        f"  Cost estimate:    ${usage['estimated_cost_usd']:.4f}",
+        f"  Tokens used:      {usage['input_tokens']:,} in / {usage['output_tokens']:,} out",
+        "",
+        f"  Baseline score:   {baseline_score:.4f}",
+        f"  Best score:       {best_score:.4f}  ({improvement_str})",
+        "",
+    ]
+    if kept_changes:
+        output_lines.append(f"  Kept changes ({len(kept_changes)}):")
+        output_lines.extend(kept_changes)
+        output_lines.append("")
+    output_lines += [
+        f"  Best skill saved: SKILL.md.best",
+        "=" * 60,
+        "",
+    ]
+
+    print("\n".join(output_lines))
+
+    # Write .tmp/run-summary.md
+    tmp_dir = PROJECT_ROOT / ".tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    md_lines = [
+        "# AutoEvaluation Run Summary",
+        "",
+        f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  ",
+        f"**Iterations:** {iterations_run}  ",
+        f"**Time elapsed:** {elapsed_str}  ",
+        f"**Cost estimate:** ${usage['estimated_cost_usd']:.4f}  ",
+        "",
+        "## Score",
+        "",
+        "| | Score |",
+        "|---|---|",
+        f"| Baseline | {baseline_score:.4f} |",
+        f"| Best | {best_score:.4f} |",
+        f"| Improvement | {improvement_str} |",
+        "",
+    ]
+    if kept_changes:
+        md_lines += ["## Kept Changes", ""]
+        for c in kept_changes:
+            md_lines.append(c.strip().replace("·", "-"))
+        md_lines.append("")
+    md_lines.append("Best skill file: `SKILL.md.best`")
+
+    (PROJECT_ROOT / ".tmp" / "run-summary.md").write_text(
+        "\n".join(md_lines), encoding="utf-8"
+    )
+    print(f"  Summary written to .tmp/run-summary.md\n")
 
 
 def _default_dimensions():
@@ -248,7 +374,6 @@ def _quick_start_config(args) -> dict:
         print("  Create a prompts file or use --prompts to specify one.", file=sys.stderr)
         sys.exit(1)
 
-    # Default to 10 iterations in quick-start mode to avoid infinite loops
     iterations = args.iterations if args.iterations else 10
     hours = args.hours
 
@@ -272,7 +397,6 @@ def _quick_start_config(args) -> dict:
         "deterministic_metrics": [],
     }
 
-    # Also write it to config.yaml so experiment_runner.py can read it
     import yaml
     cfg_path = PROJECT_ROOT / "config.yaml"
     cfg_path.write_text(yaml.dump(cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
@@ -327,6 +451,7 @@ With existing config:
 
     start_time = time.time()
     iteration = 0
+    iter_times = []
     consecutive_discards = 0
     iterations_since_improvement = 0
 
@@ -339,6 +464,7 @@ With existing config:
 
     while True:
         iteration += 1
+        iter_start = time.time()
 
         # Check limits
         if max_iterations and iteration > max_iterations:
@@ -356,8 +482,9 @@ With existing config:
             print(f"\nConverged — no improvement in {convergence_window} iterations. Stopping.")
             break
 
+        iter_label = f"{iteration}/{max_iterations}" if max_iterations else str(iteration)
         print(f"\n{'='*60}")
-        print(f"ITERATION {iteration}")
+        print(f"ITERATION {iter_label}")
         print(f"{'='*60}")
 
         best_score = get_best_score(results_tsv)
@@ -404,10 +531,24 @@ With existing config:
         if consecutive_discards >= 5:
             print("5 consecutive discards detected — next iteration will use radical approach.")
 
-    elapsed = (time.time() - start_time) / 3600
-    print(f"\nOptimisation complete — {iteration - 1} iterations in {elapsed:.1f} hours")
-    print(f"Best score: {get_best_score(results_tsv):.4f}")
-    print(f"Token usage: {client.usage_summary()}")
+        # Per-iteration timing and progress
+        iter_elapsed = time.time() - iter_start
+        iter_times.append(iter_elapsed)
+        iter_m = int(iter_elapsed // 60)
+        iter_s = int(iter_elapsed % 60)
+        avg_secs = sum(iter_times) / len(iter_times)
+        remaining = max_iterations - iteration if max_iterations else 0
+        eta_m = int(avg_secs * remaining / 60) if remaining > 0 else 0
+        cost = client.estimated_cost_usd
+
+        eta_str = f"~{eta_m} min remaining · " if max_iterations and remaining > 0 else ""
+        print(f"\n  {run_id} completed in {iter_m}m {iter_s}s")
+        print(f"  Iteration {iter_label} · {eta_str}Cost: ${cost:.3f}")
+
+        _write_status("running", run_id, iteration, max_iterations, start_time, iter_times, client)
+
+    _write_status("complete", "", iteration - 1, max_iterations, start_time, iter_times, client)
+    print_run_summary(results_tsv, start_time, client, iteration - 1)
 
 
 if __name__ == "__main__":

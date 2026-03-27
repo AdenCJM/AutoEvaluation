@@ -107,6 +107,17 @@ def read_tsv(tsv_path: str, metric_config: dict) -> dict:
     }
 
 
+def read_status() -> dict:
+    """Read .tmp/run_status.json written by run_loop.py."""
+    status_path = PROJECT_ROOT / ".tmp" / "run_status.json"
+    if not status_path.exists():
+        return {}
+    try:
+        return json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -499,6 +510,38 @@ tr:hover td { background: var(--bg-card-hover); }
 .elapsed-detail .label { font-size: 10px; color: var(--text-muted); font-weight: 500; text-transform: uppercase; }
 .elapsed-detail .val { font-size: 14px; font-weight: 700; color: var(--text-secondary); }
 
+/* ── Run Progress ─────────────────────────────── */
+.run-progress-card {
+    background: var(--green-light);
+    border: 1px solid var(--green-border);
+    border-radius: 10px;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 18px;
+    gap: 20px;
+}
+.run-progress-card.hidden { display: none; }
+.run-progress-left { display: flex; align-items: center; gap: 10px; flex: 1; }
+.run-pulse {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green-text);
+    animation: pulse 1.5s ease-in-out infinite;
+    flex-shrink: 0;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.85); }
+}
+.run-progress-label { font-size: 12px; color: var(--green-text); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+.run-progress-bar-wrap { flex: 1; background: var(--border); border-radius: 4px; height: 6px; overflow: hidden; min-width: 80px; }
+.run-progress-bar { height: 100%; background: var(--green-text); border-radius: 4px; transition: width 0.4s ease; }
+.run-progress-details { display: flex; gap: 20px; }
+.run-progress-detail { text-align: right; }
+.run-progress-detail .label { font-size: 10px; color: var(--text-muted); font-weight: 500; text-transform: uppercase; }
+.run-progress-detail .val { font-size: 14px; font-weight: 700; color: var(--green-text); }
+
 /* ── Status Bar ────────────────────────────────── */
 .status-bar {
     background: var(--bg-header);
@@ -617,6 +660,33 @@ tr:hover td { background: var(--bg-card-hover); }
     </div>
 
     <div id="dashboard" style="display:none;">
+
+        <!-- Run Progress Card (shown only during active run) -->
+        <div class="run-progress-card hidden" id="runProgressCard">
+            <div class="run-progress-left">
+                <div class="run-pulse"></div>
+                <div style="flex:1">
+                    <div class="run-progress-label">Running</div>
+                    <div class="run-progress-bar-wrap">
+                        <div class="run-progress-bar" id="runProgressBar" style="width:0%"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="run-progress-details">
+                <div class="run-progress-detail">
+                    <div class="label">Iteration</div>
+                    <div class="val" id="runProgressIter">&mdash;</div>
+                </div>
+                <div class="run-progress-detail">
+                    <div class="label">ETA</div>
+                    <div class="val" id="runProgressEta">&mdash;</div>
+                </div>
+                <div class="run-progress-detail">
+                    <div class="label">Cost</div>
+                    <div class="val" id="runProgressCost">&mdash;</div>
+                </div>
+            </div>
+        </div>
 
         <!-- Elapsed Time Bar -->
         <div class="elapsed-card" id="elapsedCard">
@@ -748,7 +818,8 @@ async function fetchData() {
 }
 
 function dataHash(data) {
-    return data.runs.length + "_" + (data.latest ? data.latest.composite_score : 0);
+    const runStatus = data.run_status ? data.run_status.status + "_" + (data.run_status.current_iteration || 0) : "";
+    return data.runs.length + "_" + (data.latest ? data.latest.composite_score : 0) + "_" + runStatus;
 }
 
 function formatDuration(ms) {
@@ -1104,6 +1175,31 @@ function updateHistoryTable(data) {
     }).join("");
 }
 
+function formatDuration(seconds) {
+    if (!seconds || seconds <= 0) return "\u2014";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return h + "h " + m + "m";
+    return m + "m";
+}
+
+function updateRunProgress(data) {
+    const card = document.getElementById("runProgressCard");
+    const rs = data.run_status;
+    if (!rs || rs.status !== "running") {
+        card.classList.add("hidden");
+        return;
+    }
+    card.classList.remove("hidden");
+    const cur = rs.current_iteration || 0;
+    const max = rs.max_iterations || 0;
+    const pct = max > 0 ? Math.min(100, Math.round((cur / max) * 100)) : 0;
+    document.getElementById("runProgressBar").style.width = pct + "%";
+    document.getElementById("runProgressIter").textContent = max > 0 ? cur + "/" + max : cur;
+    document.getElementById("runProgressEta").textContent = formatDuration(rs.eta_seconds);
+    document.getElementById("runProgressCost").textContent = rs.cost_usd != null ? "$" + rs.cost_usd.toFixed(3) : "\u2014";
+}
+
 function updateDashboard(data) {
     if (data.metric_names && data.metric_names.length) METRIC_NAMES = data.metric_names;
     if (data.metric_labels) METRIC_LABELS = data.metric_labels;
@@ -1112,10 +1208,12 @@ function updateDashboard(data) {
     if (data.runs.length === 0) {
         document.getElementById("empty-state").style.display = "block";
         document.getElementById("dashboard").style.display = "none";
+        updateRunProgress(data);
         return;
     }
     document.getElementById("empty-state").style.display = "none";
     document.getElementById("dashboard").style.display = "block";
+    updateRunProgress(data);
 
     updateHeader(data);
     updateElapsed(data);
@@ -1174,6 +1272,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/api/results":
             data = read_tsv(self.tsv_path, self.metric_config)
+            data["run_status"] = read_status()
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
