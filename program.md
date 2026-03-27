@@ -49,7 +49,7 @@ These are configured in `config.yaml` — do not change them during a run.
 
 ## The Loop
 
-Repeat until a limit is hit (or indefinitely if no limits are set). Never stop early. Never ask "should I continue?". The user may be away from the computer.
+Repeat until a limit is hit (or indefinitely if no limits are set). After each experiment, output a brief summary (Step 5 below). If the user provides steering mid-run, incorporate it into your next hypothesis — otherwise continue autonomously. Do not pause to ask for permission; just report and proceed.
 
 ### Step 1: Analyse
 
@@ -106,10 +106,23 @@ Repeat until a limit is hit (or indefinitely if no limits are set). Never stop e
   - Update the results.tsv row: set decision to DISCARD
   - Log: "DISCARD — score did not improve (X vs best Y)"
 
-### Step 5: Continue
+### Step 5: Report
+
+Output a brief summary of the iteration to the user:
+
+```
+Iteration N — exp_NNN
+Hypothesis: [one sentence]
+Change: [what you changed in SKILL.md]
+Score: [previous best] → [new score] ([+/-delta])  [✓ KEEP / ✗ DISCARD]
+```
+
+If the user responds with guidance ("focus on metric X", "try a different approach", "that's good enough — stop"), incorporate it before continuing. Otherwise proceed immediately to Step 6.
+
+### Step 6: Continue
 
 - Check all stopping conditions before continuing (iterations, hours, cost, convergence)
-- If any limit is reached, log "Optimisation complete — ran N iterations in X hours" and stop
+- If any limit is reached, output "Optimisation complete — ran N iterations in X hours. Best score: Y" and stop
 - Otherwise, go back to Step 1
 - If a tool errors, read the error, fix it, retry
 - If you've made **5 consecutive DISCARD** decisions, try a fundamentally different strategy:

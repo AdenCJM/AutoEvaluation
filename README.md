@@ -57,7 +57,43 @@ The full experiment history is in `examples/writing-style/sample-results.tsv`.
 - Python 3.10+
 - An API key for your preferred LLM provider (Gemini, OpenAI, or Anthropic)
 
-### One command start
+### With Claude Code (recommended)
+
+```bash
+git clone https://github.com/AdenCJM/AutoEvaluation.git
+cd AutoEvaluation
+```
+
+Open the project in Claude Code — either open the folder in VS Code with the Claude Code extension, or run `claude` in the project directory. Then tell Claude what you want:
+
+> *"I want to optimise my writing style guide"*
+> *"Help me set up AutoEvaluation for my email templates"*
+> *"Run the optimisation loop"*
+
+Claude handles the rest. It walks through setup if `config.yaml` is missing, runs experiments, and reports the result of each iteration directly in the chat:
+
+```
+Iteration 3 — exp_003
+Hypothesis: task_accuracy is low because the skill doesn't constrain email length
+Change: Added "Keep emails under 200 words" rule
+Score: 0.6420 → 0.7185 (+0.0765)  ✓ KEEP
+```
+
+You can steer mid-run at any point — "focus on the tone metric", "try removing rules instead of adding them", or "that's good enough, stop" — and Claude will adjust.
+
+**Try the included writing style example:**
+
+> *"Copy the writing style example files and run the optimisation loop"*
+
+**Already have a skill file?**
+
+> *"Here's my skill file — [paste contents or give the path] — optimise it"*
+
+Claude will generate test prompts, configure the rubric, and start the loop.
+
+### Headless / terminal
+
+If you prefer to run without Claude Code:
 
 ```bash
 git clone https://github.com/AdenCJM/AutoEvaluation.git
@@ -66,13 +102,11 @@ echo "GEMINI_API_KEY=your-key" > .env
 ./start.sh
 ```
 
-`start.sh` handles everything: creates a virtual environment (works with `uv` or `pip`), installs dependencies, validates your API key, runs setup if needed, and starts the optimisation loop. If anything is wrong — missing key, bad key, missing config — it tells you immediately.
+`start.sh` creates the virtual environment, installs dependencies, validates your API key, runs the setup wizard if `config.yaml` is missing, and starts the loop.
 
-> **Using OpenAI or Anthropic?** The default config uses Gemini. If you're using a different provider, set the matching key in `.env` (e.g. `OPENAI_API_KEY=your-key`) and update the `provider` field in `config.yaml` before running. See [BYO model](#byo-model).
+> **Using OpenAI or Anthropic?** Set the matching key in `.env` (e.g. `OPENAI_API_KEY=your-key`) and update `config.yaml` before running. See [BYO model](#byo-model).
 
-### Try the included example
-
-The repo ships with a complete working example (a writing style guide):
+**Try the included example (terminal):**
 
 ```bash
 echo "GEMINI_API_KEY=your-key" > .env
@@ -83,77 +117,23 @@ cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
 ./start.sh
 ```
 
-> **Using OpenAI or Anthropic?** The example `config.yaml` hardcodes Gemini. After copying it, open `config.yaml` and update `provider`, `model`, and `api_key_env` to match your provider. See [BYO model](#byo-model) for the exact values.
+> **Using OpenAI or Anthropic?** The example `config.yaml` hardcodes Gemini. After copying it, update `provider`, `model`, and `api_key_env`. See [BYO model](#byo-model).
 
-### Point at your own skill
-
-Already have a skill file you want to optimise? Two options:
-
-**Quick (no prompts, all defaults):**
-```bash
-echo "GEMINI_API_KEY=your-key" > .env
-python3 setup.py --defaults --skill-file /path/to/your/SKILL.md --generate-prompts
-./start.sh
-```
-
-This validates your API key, uses AI to generate test prompts from your skill file, applies sensible defaults (3 evaluation dimensions, 10 iterations), and you're running.
-
-**Guided (interactive wizard):**
-```bash
-python3 tools/run_loop.py --skill path/to/your/SKILL.md --provider gemini --iterations 10
-```
-
-This auto-generates `config.yaml` with sensible defaults and starts optimising immediately.
-
-### Setup wizard
+**Setup wizard and direct run:**
 
 ```bash
-python3 setup.py
+python3 setup.py                              # interactive setup wizard
+python3 tools/run_loop.py                     # run the loop
+python3 tools/run_loop.py --iterations 10     # limit to 10 experiments
 ```
 
-The wizard walks you through:
-1. **Provider + model** — pick Gemini, OpenAI, or Anthropic (API key validated instantly)
-2. **Your skill** — paste or describe the instructions you want to optimise
-3. **Test prompts** — AI generates prompts from your skill description, or enter manually
-4. **Eval rubric** — set 2-5 quality dimensions (or use the defaults)
-5. **Run duration** — max iterations, max hours, or unlimited
-
-It generates: `config.yaml`, `SKILL.md`, `prompts/prompts.json`, `.env`, and `.claude/settings.json`.
-
-**Skip all prompts:**
+`setup.py` also accepts flags to skip prompts:
 
 ```bash
-# All defaults — Gemini, default rubric, 5 generic prompts, 10 iterations
-python3 setup.py --defaults
-
-# Defaults with a custom skill and AI-generated prompts
-python3 setup.py --defaults --skill-file SKILL.md --generate-prompts
-
-# Defaults with OpenAI instead of Gemini
-python3 setup.py --defaults --provider openai
+python3 setup.py --defaults                                        # all defaults
+python3 setup.py --defaults --skill-file SKILL.md --generate-prompts   # with AI-generated test prompts
+python3 setup.py --defaults --provider openai                      # OpenAI instead of Gemini
 ```
-
-**Already have a skill file?** Skip the paste step:
-
-```bash
-python3 setup.py --skill-file /path/to/your/SKILL.md
-python3 setup.py --skill-file SKILL.md --prompts-file my-prompts.json
-```
-
-### With Claude Code (autonomous)
-
-The recommended way to run AutoEvaluation is headless via `./start.sh` or `python3 tools/run_loop.py` directly.
-
-If you want Claude Code to drive the loop (making its own hypothesis and strategy decisions), run this from your terminal — not from inside a Claude Code chat session:
-
-```bash
-python3 setup.py    # or use --defaults
-claude -p program.md
-```
-
-Claude reads `program.md`, which contains the loop instructions. It autonomously runs experiments, modifies your skill, and tracks results. All bash commands are auto-approved via `.claude/settings.json`.
-
-> **Note:** `claude -p program.md` spawns a new Claude Code process from the terminal. It does not run inside an existing Claude chat. If `claude -p` just prints the file instead of executing it, use the headless path instead: `python3 tools/run_loop.py`.
 
 ### Watch scores in real time
 
