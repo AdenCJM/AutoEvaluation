@@ -5,66 +5,236 @@ description: Run the AutoEvaluation optimisation loop to iteratively improve a S
 
 # AutoEvaluation
 
-Runs the interactive optimisation loop for the current project.
+Autonomous skill optimisation through iterative evaluation and hill-climbing.
 
-## Step 1: Confirm you're in the right place
+This skill has **three phases**: interactive setup → dashboard launch → autopilot execution.
 
-Check for these files in the current directory:
-- `program.md` — loop instructions
-- `SKILL.md` — the skill being optimised
-- `config.yaml` — project configuration (may not exist yet on first run)
+---
 
-If `program.md` is missing, this isn't an AutoEvaluation project. Tell the user and offer:
-> "This doesn't look like an AutoEvaluation project. You can clone one with:
-> `git clone https://github.com/AdenCJM/AutoEvaluation.git`
-> Then open that folder in Claude Code and run `/autoeval` again."
+## Phase 1: Interactive Setup
 
-## Step 2: Verify setup before running
+Before running anything, have a conversation with the user to understand what they want to optimise. **Do not run setup.py** — instead, ask questions directly and generate the config yourself.
 
-Check these three things:
+### Step 1.1: Check if already configured
 
-**config.yaml** — If missing, ask the user what they want to optimise and run `python3 setup.py` on their behalf. The wizard takes 2 minutes and generates the config interactively. If they want to skip prompts: `python3 setup.py --defaults`.
+Look for `config.yaml` and `results.tsv` in the current directory.
 
-**SKILL.md content** — If it still contains placeholder text ("Replace this file with your skill instructions"), ask the user to describe or paste their skill. You can help them draft it.
+- If **both exist** and `results.tsv` has data rows: ask the user
+  > "I found an existing run with N experiments. Want me to **resume** where you left off, or **start fresh** with a new skill?"
+  - If resume → skip to Phase 2
+  - If start fresh → continue with setup questions below
 
-**API key** — Read `config.yaml` for `api_key_env` (e.g. `GEMINI_API_KEY`). Check `.env` for that key. If it's missing, ask the user to add it: `echo "GEMINI_API_KEY=your-key" >> .env`.
+- If **config.yaml exists** but no `results.tsv`: ask
+  > "I found a config for [skill name] but no results yet. Want me to **use this config**, or **set up from scratch**?"
 
-Once all three are confirmed, proceed.
+- If neither exists → continue with setup questions
 
-## Step 3: Run the loop
+### Step 1.2: Understand the skill
 
-Read `program.md` in full and follow its instructions exactly. Do not summarise or skip steps.
+Ask the user:
 
-The loop:
-1. Runs a baseline experiment to establish the starting score
-2. Analyses the weakest metrics in the results
-3. Forms a hypothesis and makes one targeted change to `SKILL.md`
-4. Re-evaluates and compares against the best score
-5. Keeps improvements, reverts failures
-6. Reports after each experiment (see below)
-7. Repeats until the limits in `config.yaml` are reached
+> **What skill do you want to improve?**
+>
+> This is a set of instructions that tells an LLM how to behave. For example:
+> - Writing style rules for blog posts
+> - Sales email tone and structure
+> - Code review feedback guidelines
+> - Customer support response templates
+> - Technical documentation standards
 
-## Step 4: Report after every experiment
+Wait for their response. Based on what they say, follow up:
 
-After each experiment completes, output a brief summary before continuing:
+> **Can you paste your skill instructions, or describe what you want and I'll draft them for you?**
 
+If they paste content, use it directly. If they describe it, draft a SKILL.md for them and show it, asking "Does this capture what you want?"
+
+Extract a short `skill_name` (snake-case, e.g. `writing-style`) and a one-line `skill_description` from the conversation.
+
+### Step 1.3: Define success metrics
+
+Ask the user:
+
+> **What observable, quantifiable metrics matter most for this skill?**
+>
+> Here are common ones — pick 2-4, or describe your own:
+>
+> 1. **Human-sounding** — Does the output read like a human wrote it? (vs obviously AI-generated)
+> 2. **Task accuracy** — Does it follow the skill instructions correctly?
+> 3. **Tone consistency** — Does it maintain the right tone throughout?
+> 4. **Brevity** — Is it concise without losing meaning?
+> 5. **Technical accuracy** — Are facts, code, or technical details correct?
+> 6. **Persuasiveness** — Does it convince or motivate the reader?
+> 7. **Creativity** — Is the output original and engaging?
+> 8. **Custom** — Describe your own metric and what 1 (worst) vs 5 (best) looks like
+>
+> Just list the numbers or names, e.g. "1, 2, and 4" or "human-sounding, accuracy, and brevity"
+
+Wait for their response. Map their choices to metric objects with name, weight, and rubric. Distribute weights evenly unless they indicate some matter more than others.
+
+If they choose "Custom", ask:
+> "What's the metric called, and what does a score of 1 (worst) vs 5 (best) look like?"
+
+### Step 1.4: LLM Provider
+
+Check `.env` in the project root for existing API keys (GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY).
+
+- If a key is found: ask
+  > "I found a [Provider] API key in your .env. Want me to use that, or a different provider?"
+
+- If no key is found: ask
+  > "Which LLM provider do you want to use for evaluation?
+  > 1. **Gemini** (Google) — cheapest, recommended
+  > 2. **OpenAI** (GPT-4o)
+  > 3. **Anthropic** (Claude)
+  >
+  > Then I'll need your API key."
+
+After they specify the provider, if the key isn't in `.env`, ask:
+> "Paste your [Provider] API key and I'll save it to .env:"
+
+### Step 1.5: Run duration
+
+Ask:
+
+> **How many iterations should I run?**
+>
+> - **10** is a quick test (5-15 min)
+> - **20-30** is a solid optimisation run (30-60 min)
+> - **50+** is a deep run (1-2 hours)
+>
+> You can always stop me early or extend later.
+
+### Step 1.6: Generate config files
+
+Now create all the config files. You have two options:
+
+**Option A (preferred):** Call the generate_config.py helper:
+```bash
+python3 tools/generate_config.py \
+  --skill-name "<name>" \
+  --skill-description "<description>" \
+  --skill-content "<content>" \
+  --provider <provider> \
+  --api-key "<key>" \
+  --metrics '<json_array>' \
+  --iterations <N> \
+  --generate-prompts
 ```
-Iteration N — exp_NNN
-Hypothesis: [one sentence]
-Change: [what you changed in SKILL.md]
-Score: [previous best] → [new score] ([+/-delta])  [✓ KEEP / ✗ DISCARD]
+
+**Option B:** If generate_config.py doesn't exist or fails, write the files yourself:
+- `config.yaml` — provider, model, api_key_env, metrics, iterations
+- `SKILL.md` — the skill with YAML frontmatter
+- `prompts/prompts.json` — test prompts (generate 5-8 diverse ones based on the skill)
+- `.env` — API key
+- `.claude/settings.json` — auto-approve rules
+
+After generating, show the AI-generated test prompts to the user:
+
+> "I've generated these test scenarios for your skill:
+>
+> 1. [prompt summary]
+> 2. [prompt summary]
+> ...
+>
+> Look good, or want me to add/change any?"
+
+Wait for confirmation before proceeding.
+
+---
+
+## Phase 2: Dashboard Launch
+
+The dashboard gives the user a live view of progress. Always offer it before starting the loop.
+
+### Step 2.1: Start the dashboard server
+
+Run the dashboard in the background:
+```bash
+python3 tools/dashboard_server.py --port 8050 &
 ```
 
-If the user sends a message during the run, read it and adjust your next hypothesis accordingly — e.g. "focus on the tone metric", "try removing rules", "stop, that's enough". Otherwise continue autonomously without waiting for input.
+### Step 2.2: Ask about opening the browser
 
-## Step 5: Final summary
+Ask the user:
 
-When the run ends (limits reached or user says stop):
+> **I've started the live tracking dashboard. Want me to open it in your browser?**
+>
+> 📊 http://localhost:8050
+>
+> You can watch scores, metrics, and experiment history update in real time while I work.
 
+If they say yes:
+```bash
+open http://localhost:8050
 ```
-Optimisation complete
-Ran N iterations in X hours · Best score: Y (was Z, +delta)
-Best version saved to SKILL.md.best
+
+If they say no, tell them they can open it anytime at that URL.
+
+### Step 2.3: Brief orientation
+
+Tell the user:
+
+> **Starting the optimisation now. Here's what will happen:**
+>
+> 1. I'll run a baseline evaluation to establish the starting score
+> 2. Then I'll iterate: analyse weaknesses → modify the skill → re-evaluate → keep or revert
+> 3. You can watch progress on the dashboard or just check back later
+> 4. If you want to steer me (e.g. "focus on tone"), just send a message
+>
+> I'll run for **N iterations** unless you stop me.
+> Starting now...
+
+---
+
+## Phase 3: Autopilot Execution
+
+Run the optimisation loop headless. **Do not pause for input** — just run and let the user watch the dashboard.
+
+### Step 3.1: Run the loop
+
+Execute the headless loop:
+```bash
+python3 tools/run_loop.py
 ```
 
-Offer to show a breakdown of which changes were kept and what each one improved.
+This will:
+- Establish a baseline if one doesn't exist
+- Iterate through analyse → modify → evaluate → decide cycles
+- Print progress to the terminal
+- Write status updates that the dashboard reads
+- Stop when the configured iteration limit is reached
+
+**Let this run to completion.** Do not interrupt it. The loop handles everything:
+- Keeping improvements and reverting failures
+- Trying radical changes after 5 consecutive discards
+- Writing the final summary
+
+### Step 3.2: Post-run
+
+After `run_loop.py` finishes, read `.tmp/run-summary.md` if it exists and present the results:
+
+> **Optimisation complete!**
+>
+> - Ran N iterations in X time
+> - Score: [baseline] → [best] (+improvement)
+> - [N] changes kept
+> - Best version saved to `SKILL.md.best`
+>
+> Want me to show you which changes were kept and what each one improved?
+
+If the user wants to deploy the optimised skill:
+```bash
+mkdir -p ~/.claude/skills/<skill-name>
+cp SKILL.md.best ~/.claude/skills/<skill-name>/SKILL.md
+```
+
+---
+
+## Important Rules
+
+- **Never modify files in `tools/` or `prompts/`** during a run
+- **Never modify `program.md`** or `config.yaml` during a run
+- If any tool errors during setup, read the error and fix it — don't just fail
+- The interactive setup replaces `setup.py` — don't shell out to `setup.py` for Claude Code users
+- If the user sends a message during Phase 3, note it but don't cancel the running loop
+- Always start the dashboard before the loop so the user can track progress from the beginning

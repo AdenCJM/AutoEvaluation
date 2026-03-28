@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # AutoEvaluation — zero-friction entry point
 # Installs deps, runs setup if needed, validates API key, then starts the loop.
+# Now also launches the dashboard and optionally opens the browser.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -117,13 +118,46 @@ if [ -f "$SKILL_SRC" ] && [ ! -f "$SKILL_DEST" ]; then
   echo ""
 fi
 
-# ── 7. Start the optimisation loop ──────────────────────────────
-echo "Starting optimisation loop..."
-echo ""
-echo "  Dashboard: python3 tools/dashboard_server.py (http://localhost:8050)"
+# ── 7. Start the dashboard ───────────────────────────────────────
+DASHBOARD_PORT="${DASHBOARD_PORT:-8050}"
+echo "Starting dashboard on http://localhost:${DASHBOARD_PORT}..."
+python3 tools/dashboard_server.py --port "$DASHBOARD_PORT" &
+DASHBOARD_PID=$!
+echo "  ✓ Dashboard running (PID: $DASHBOARD_PID)"
 echo ""
 
-echo "  Mode: Headless  (python3 tools/run_loop.py)"
-echo "  Stop: Ctrl+C"
+# Wait a moment for the server to start
+sleep 1
+
+# Open browser if --open flag is passed, or ask interactively
+if [[ "${1:-}" == "--open" ]] || [[ "${1:-}" == "-o" ]]; then
+  echo "  Opening dashboard in browser..."
+  open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+elif [ -t 0 ]; then
+  # Interactive terminal — ask the user
+  read -p "  Open dashboard in browser? (y/n) [y]: " OPEN_BROWSER
+  OPEN_BROWSER="${OPEN_BROWSER:-y}"
+  if [[ "$OPEN_BROWSER" == "y" ]] || [[ "$OPEN_BROWSER" == "Y" ]]; then
+    open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+  fi
+fi
 echo ""
+
+# ── 8. Start the optimisation loop ──────────────────────────────
+echo "Starting optimisation loop..."
+echo ""
+echo "  Dashboard: http://localhost:${DASHBOARD_PORT}"
+echo "  Stop:      Ctrl+C"
+echo ""
+
+# Cleanup dashboard on exit
+cleanup() {
+  echo ""
+  echo "  Stopping dashboard (PID: $DASHBOARD_PID)..."
+  kill "$DASHBOARD_PID" 2>/dev/null || true
+  wait "$DASHBOARD_PID" 2>/dev/null || true
+  echo "  ✓ Dashboard stopped"
+}
+trap cleanup EXIT
+
 python3 tools/run_loop.py
