@@ -19,90 +19,106 @@ Before running anything, have a conversation with the user to understand what th
 
 Look for `config.yaml` and `results.tsv` in the current directory.
 
-- If **both exist** and `results.tsv` has data rows: ask the user
-  > "I found an existing run with N experiments. Want me to **resume** where you left off, or **start fresh** with a new skill?"
-  - If resume → skip to Phase 2
-  - If start fresh → continue with setup questions below
+- If **both exist** and `results.tsv` has data rows: use AskUserQuestion:
 
-- If **config.yaml exists** but no `results.tsv`: ask
-  > "I found a config for [skill name] but no results yet. Want me to **use this config**, or **set up from scratch**?"
+  Question: "I found an existing run with N experiments. What would you like to do?"
+  Header: "Existing run"
+  Options:
+  - A) Resume — pick up where I left off (Recommended)
+  - B) Start fresh — set up a new skill
+
+  If A → skip to Phase 2
+  If B → continue with setup questions below
+
+- If **config.yaml exists** but no `results.tsv`: use AskUserQuestion:
+
+  Question: "I found a config for [skill name] but no results yet. How would you like to proceed?"
+  Header: "Config found"
+  Options:
+  - A) Use this config — start running (Recommended)
+  - B) Set up from scratch — reconfigure
 
 - If neither exists → continue with setup questions
 
 ### Step 1.2: Understand the skill
 
-Ask the user:
+Use AskUserQuestion:
 
-> **What skill do you want to improve?**
->
-> This is a set of instructions that tells an LLM how to behave. For example:
-> - Writing style rules for blog posts
-> - Sales email tone and structure
-> - Code review feedback guidelines
-> - Customer support response templates
-> - Technical documentation standards
+Question: "Do you have existing skill instructions to paste, or would you like me to draft them from a description?"
+Header: "Skill content"
+Options:
+- A) I'll paste my instructions
+- B) Draft them for me
 
-Wait for their response. Based on what they say, follow up:
+If A → ask the user to paste their skill content.
+If B → ask them to describe their skill, draft a SKILL.md, show it to them, then use AskUserQuestion:
 
-> **Can you paste your skill instructions, or describe what you want and I'll draft them for you?**
+  Question: "Does this capture what you want?"
+  Header: "Skill draft"
+  Options:
+  - A) Yes, looks good (Recommended)
+  - B) Let me revise it
 
-If they paste content, use it directly. If they describe it, draft a SKILL.md for them and show it, asking "Does this capture what you want?"
+  If B → ask what to change, update the draft, and repeat.
 
 Extract a short `skill_name` (snake-case, e.g. `writing-style`) and a one-line `skill_description` from the conversation.
 
 ### Step 1.3: Define success metrics
 
-Ask the user:
+Use AskUserQuestion with multiSelect:
 
-> **What observable, quantifiable metrics matter most for this skill?**
->
-> Here are common ones — pick 2-4, or describe your own:
->
-> 1. **Human-sounding** — Does the output read like a human wrote it? (vs obviously AI-generated)
-> 2. **Task accuracy** — Does it follow the skill instructions correctly?
-> 3. **Tone consistency** — Does it maintain the right tone throughout?
-> 4. **Brevity** — Is it concise without losing meaning?
-> 5. **Technical accuracy** — Are facts, code, or technical details correct?
-> 6. **Persuasiveness** — Does it convince or motivate the reader?
-> 7. **Creativity** — Is the output original and engaging?
-> 8. **Custom** — Describe your own metric and what 1 (worst) vs 5 (best) looks like
->
-> Just list the numbers or names, e.g. "1, 2, and 4" or "human-sounding, accuracy, and brevity"
-
-Wait for their response. Map their choices to metric objects with name, weight, and rubric. Distribute weights evenly unless they indicate some matter more than others.
+Question: "Which metrics matter most for this skill? Pick 2–4."
+Header: "Metrics"
+multiSelect: true
+Options:
+- Human-sounding — reads like a human, not obviously AI
+- Task accuracy — follows the skill instructions correctly
+- Tone consistency — maintains the right tone throughout
+- Brevity — concise without losing meaning
+- Technical accuracy — facts, code, or technical details are correct
+- Persuasiveness — convinces or motivates the reader
+- Creativity — original and engaging output
+- Custom — I'll describe my own metric
 
 If they choose "Custom", ask:
 > "What's the metric called, and what does a score of 1 (worst) vs 5 (best) look like?"
+
+Map their choices to metric objects with name, weight, and rubric. Distribute weights evenly unless they indicate some matter more than others.
 
 ### Step 1.4: LLM Provider
 
 Check `.env` in the project root for existing API keys (GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY).
 
-- If a key is found: ask
-  > "I found a [Provider] API key in your .env. Want me to use that, or a different provider?"
+- If a key is found: use AskUserQuestion:
 
-- If no key is found: ask
-  > "Which LLM provider do you want to use for evaluation?
-  > 1. **Gemini** (Google) — cheapest, recommended
-  > 2. **OpenAI** (GPT-4o)
-  > 3. **Anthropic** (Claude)
-  >
-  > Then I'll need your API key."
+  Question: "I found a [Provider] API key in your .env. Which provider should I use?"
+  Header: "LLM provider"
+  Options:
+  - A) Use [Provider] — already configured (Recommended)
+  - B) Use a different provider
+
+- If no key is found (or user chose a different provider): use AskUserQuestion:
+
+  Question: "Which LLM provider do you want to use for evaluation?"
+  Header: "LLM provider"
+  Options:
+  - A) Gemini (Google) — cheapest, recommended (Recommended)
+  - B) OpenAI (GPT-4o)
+  - C) Anthropic (Claude)
 
 After they specify the provider, if the key isn't in `.env`, ask:
 > "Paste your [Provider] API key and I'll save it to .env:"
 
 ### Step 1.5: Run duration
 
-Ask:
+Use AskUserQuestion:
 
-> **How many iterations should I run?**
->
-> - **10** is a quick test (5-15 min)
-> - **20-30** is a solid optimisation run (30-60 min)
-> - **50+** is a deep run (1-2 hours)
->
-> You can always stop me early or extend later.
+Question: "How many iterations should I run? You can stop early or extend later."
+Header: "Iterations"
+Options:
+- A) 10 — quick test (5–15 min)
+- B) 20–30 — solid optimisation run (30–60 min)
+- C) 50+ — deep run (1–2 hours)
 
 ### Step 1.6: Generate config files
 
@@ -128,17 +144,15 @@ python3 tools/generate_config.py \
 - `.env` — API key
 - `.claude/settings.json` — auto-approve rules
 
-After generating, show the AI-generated test prompts to the user:
+After generating, show the AI-generated test prompts and use AskUserQuestion:
 
-> "I've generated these test scenarios for your skill:
->
-> 1. [prompt summary]
-> 2. [prompt summary]
-> ...
->
-> Look good, or want me to add/change any?"
+Question: "I've generated these test scenarios for your skill — do they look good?"
+Header: "Test prompts"
+Options:
+- A) Looks good, let's go (Recommended)
+- B) I want to tweak them
 
-Wait for confirmation before proceeding.
+If B → ask what to change, update the prompts, and confirm again before proceeding.
 
 ---
 
@@ -155,20 +169,18 @@ python3 tools/dashboard_server.py --port 8050 &
 
 ### Step 2.2: Ask about opening the browser
 
-Ask the user:
+Use AskUserQuestion:
 
-> **I've started the live tracking dashboard. Want me to open it in your browser?**
->
-> 📊 http://localhost:8050
->
-> You can watch scores, metrics, and experiment history update in real time while I work.
+Question: "I've started the live tracking dashboard at http://localhost:8050. Want me to open it?"
+Header: "Dashboard"
+Options:
+- A) Open it now (Recommended)
+- B) I'll open it myself
 
-If they say yes:
+If A:
 ```bash
 open http://localhost:8050
 ```
-
-If they say no, tell them they can open it anytime at that URL.
 
 ### Step 2.3: Brief orientation
 
@@ -219,10 +231,18 @@ After `run_loop.py` finishes, read `.tmp/run-summary.md` if it exists and presen
 > - Score: [baseline] → [best] (+improvement)
 > - [N] changes kept
 > - Best version saved to `SKILL.md.best`
->
-> Want me to show you which changes were kept and what each one improved?
 
-If the user wants to deploy the optimised skill:
+Use AskUserQuestion:
+
+Question: "What would you like to do next?"
+Header: "Post-run"
+Options:
+- A) Show me what changed — walk through kept improvements
+- B) Deploy the best version to ~/.claude/skills/
+- C) Run more iterations
+- D) I'm done
+
+If B:
 ```bash
 mkdir -p ~/.claude/skills/<skill-name>
 cp SKILL.md.best ~/.claude/skills/<skill-name>/SKILL.md
