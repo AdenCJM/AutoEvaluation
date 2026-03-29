@@ -65,12 +65,14 @@ Extract a short `skill_name` (snake-case, e.g. `writing-style`) and a one-line `
 
 ### Step 1.3: Define success metrics
 
-Before presenting options, read the skill content and reason about what good output looks like for this specific skill. Then write a short recommendation (2–3 sentences) explaining which 2–3 metrics you'd suggest and why, given what the skill is trying to do. For example:
+Before presenting options, read the skill content and reason about what good output looks like for this specific skill. **Prefer metrics that are quantifiable** — where a judge can point to specific, observable evidence in the output (e.g. "does the output contain X?", "is the word count under Y?", "are the instructions followed?"). Vague qualitative feels (e.g. "overall vibe") produce inconsistent scores and make optimisation noisy. An LLM judge can still score softer metrics like tone, but the rubric must describe *observable signals*, not just impressions.
 
-- A writing-style skill → human-sounding + tone consistency + brevity
-- A sales email skill → persuasiveness + task accuracy + tone consistency
-- A code review skill → technical accuracy + task accuracy + brevity
-- A customer support skill → tone consistency + task accuracy + human-sounding
+Write a short recommendation (2–3 sentences) explaining which 2–3 metrics you'd suggest and why, given what the skill is trying to do. Call out concretely what makes each metric measurable for this specific skill. For example:
+
+- A writing-style skill → task accuracy (did it follow the style rules?) + brevity (measurable by output length relative to input) + human-sounding (judge looks for specific AI tells)
+- A sales email skill → task accuracy (did it hit the required elements: hook, offer, CTA?) + persuasiveness (judge scores whether the argument is logically structured) + tone consistency (judge checks against a defined voice rubric)
+- A code review skill → technical accuracy (are the flagged issues real?) + task accuracy (does it follow the review format?) + brevity (is feedback concise, not padded?)
+- A customer support skill → task accuracy (did it resolve the issue or ask the right clarifying question?) + tone consistency (empathetic and on-brand per a rubric) + human-sounding (no AI clichés)
 
 Show this recommendation in plain text first, then present the question so the user can confirm or deviate:
 
@@ -80,19 +82,19 @@ Question: "Which metrics should I optimise for? (I've suggested a starting point
 Header: "Metrics"
 multiSelect: true
 Options:
-- Human-sounding — reads like a human, not obviously AI
-- Task accuracy — follows the skill instructions correctly
-- Tone consistency — maintains the right tone throughout
-- Brevity — concise without losing meaning
-- Technical accuracy — facts, code, or technical details are correct
-- Persuasiveness — convinces or motivates the reader
-- Creativity — original and engaging output
-- Custom — I'll describe my own metric
+- Task accuracy — did the output follow the skill's instructions? (most quantifiable — judge checks against specific rules)
+- Brevity — is it concise without losing meaning? (measurable via output length and information density)
+- Technical accuracy — are facts, code, or technical details correct? (judge verifies specific claims)
+- Human-sounding — reads like a human wrote it, not an AI (judge looks for specific AI tells and clichés)
+- Tone consistency — maintains the right tone throughout (requires a clear tone rubric to score reliably)
+- Persuasiveness — argument is logically structured and motivates action (judge scores reasoning quality)
+- Creativity — original and non-generic output (harder to quantify — use only if novelty is core to the skill)
+- Custom — I'll define my own metric with clear scoring criteria
 
 If they choose "Custom", ask:
-> "What's the metric called, and what does a score of 1 (worst) vs 5 (best) look like?"
+> "What's the metric called? Describe what a judge would look for — what specific, observable signals make this a 1 (worst) vs 5 (best)?"
 
-Map their choices to metric objects with name, weight, and rubric. Distribute weights evenly unless they indicate some matter more than others.
+Map their choices to metric objects with name, weight, and rubric. Write rubrics that describe **observable signals**, not feelings — e.g. "Score 5 if the output contains a clear call to action in the final sentence and uses second-person voice throughout" not "Score 5 if it feels persuasive". Distribute weights evenly unless they indicate some matter more than others.
 
 ### Step 1.4: LLM Provider
 
