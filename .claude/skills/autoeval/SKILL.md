@@ -65,9 +65,18 @@ Extract a short `skill_name` (snake-case, e.g. `writing-style`) and a one-line `
 
 ### Step 1.3: Define success metrics
 
+Before presenting options, read the skill content and reason about what good output looks like for this specific skill. Then write a short recommendation (2–3 sentences) explaining which 2–3 metrics you'd suggest and why, given what the skill is trying to do. For example:
+
+- A writing-style skill → human-sounding + tone consistency + brevity
+- A sales email skill → persuasiveness + task accuracy + tone consistency
+- A code review skill → technical accuracy + task accuracy + brevity
+- A customer support skill → tone consistency + task accuracy + human-sounding
+
+Show this recommendation in plain text first, then present the question so the user can confirm or deviate:
+
 Use AskUserQuestion with multiSelect:
 
-Question: "Which metrics matter most for this skill? Pick 2–4."
+Question: "Which metrics should I optimise for? (I've suggested a starting point above — you can confirm or pick your own.)"
 Header: "Metrics"
 multiSelect: true
 Options:
