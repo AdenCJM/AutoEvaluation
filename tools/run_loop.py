@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from model_client import ModelClient
-from utils import PROJECT_ROOT, load_config, sanitise_description, validate_config
+from utils import PROJECT_ROOT, default_dimensions, load_config, sanitise_description, validate_config
 
 
 def get_next_run_id(results_tsv: Path) -> str:
@@ -79,6 +79,91 @@ def get_recent_results(results_tsv: Path, n: int = 3) -> str:
     return header + "\n" + "\n".join(recent)
 
 
+def get_latest_run_id(results_tsv: Path) -> str | None:
+    """Return the run_id of the most recent completed experiment."""
+    if not results_tsv.exists():
+        return None
+    lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
+    if len(lines) <= 1:
+        return None
+    return lines[-1].split("\t")[0] or None
+
+
+def _get_worst_samples_context(latest_run_id: str, n: int = 2) -> str:
+    """Read the N worst-scoring samples and their judge reasoning.
+
+    Returns a formatted string for the modifier LLM, or "" if data is unavailable.
+    """
+    evals_dir = PROJECT_ROOT / ".tmp" / "evals" / latest_run_id
+    samples_dir = PROJECT_ROOT / ".tmp" / "samples" / latest_run_id
+
+    if not evals_dir.exists():
+        return ""
+
+    # Read all judge JSONs and compute per-sample composite scores
+    sample_scores = []
+    for judge_file in sorted(evals_dir.glob("*_llm_judge.json")):
+        try:
+            data = json.loads(judge_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if "error" in data:
+            continue
+
+        # Compute mean normalised score across all dimensions
+        scores = []
+        for key, val in data.items():
+            if isinstance(val, dict) and "normalised" in val:
+                scores.append(val["normalised"])
+        if not scores:
+            continue
+
+        # Derive sample name: "sample_0_intro_email_llm_judge.json" → "sample_0_intro_email"
+        sample_name = judge_file.name.replace("_llm_judge.json", "")
+        mean_score = sum(scores) / len(scores)
+        sample_scores.append({
+            "sample_name": sample_name,
+            "mean_score": mean_score,
+            "judge_data": data,
+        })
+
+    if not sample_scores:
+        return ""
+
+    # Sort by score ascending (worst first), take N
+    sample_scores.sort(key=lambda s: s["mean_score"])
+    worst = sample_scores[:n]
+
+    parts = []
+    for entry in worst:
+        sample_name = entry["sample_name"]
+        # Read the sample text
+        sample_file = samples_dir / f"{sample_name}.txt"
+        sample_text = ""
+        if sample_file.exists():
+            raw = sample_file.read_text(encoding="utf-8")
+            words = raw.split()
+            if len(words) > 500:
+                sample_text = " ".join(words[:500]) + "\n... [truncated]"
+            else:
+                sample_text = raw
+
+        # Format judge reasoning
+        reasons = []
+        for dim_name, dim_val in entry["judge_data"].items():
+            if isinstance(dim_val, dict) and "reason" in dim_val:
+                reasons.append(f"  {dim_name}: {dim_val.get('score', '?')}/5 — {dim_val['reason']}")
+
+        part = f"SAMPLE: {sample_name} (composite: {entry['mean_score']:.3f})"
+        if reasons:
+            part += "\nJudge reasoning:\n" + "\n".join(reasons)
+        if sample_text:
+            part += f"\nSample output:\n{sample_text}"
+        parts.append(part)
+
+    return "\n\n".join(parts)
+
+
 def run_experiment(run_id: str, description: str = "") -> dict:
     """Run the experiment runner and return the aggregate."""
     import subprocess
@@ -103,8 +188,36 @@ def run_experiment(run_id: str, description: str = "") -> dict:
     return None
 
 
-def analyse_and_modify(client: ModelClient, skill_path: Path, results_context: str, cfg: dict, force_radical: bool = False) -> str:
-    """Use the LLM to analyse weaknesses and modify the skill file."""
+def _check_skill_completeness(original: str, candidate: str) -> bool:
+    """Verify the candidate skill file wasn't truncated or corrupted.
+
+    Checks:
+    1. Starts with YAML frontmatter (---)
+    2. Has at least 50% of the original's markdown headers
+    3. Is longer than 50 characters
+    """
+    if len(candidate) < 50:
+        return False
+
+    # Check frontmatter
+    if not candidate.strip().startswith("---"):
+        return False
+
+    # Check headers preserved
+    original_headers = set(re.findall(r'^#{1,3}\s+.+', original, re.MULTILINE))
+    if not original_headers:
+        return True  # No headers to check
+    candidate_headers = set(re.findall(r'^#{1,3}\s+.+', candidate, re.MULTILINE))
+    overlap = len(original_headers & candidate_headers)
+    return overlap >= len(original_headers) * 0.5
+
+
+def analyse_and_modify(client: ModelClient, skill_path: Path, results_context: str, cfg: dict, force_radical: bool = False, latest_run_id: str = None) -> str:
+    """Use the LLM to analyse weaknesses and modify the skill file.
+
+    When latest_run_id is provided, reads the 2 worst-scoring samples and their
+    judge reasoning to give the modifier concrete examples of failure.
+    """
     current_skill = skill_path.read_text(encoding="utf-8")
 
     metric_names = []
@@ -113,17 +226,26 @@ def analyse_and_modify(client: ModelClient, skill_path: Path, results_context: s
     for m in cfg.get("llm_judge_dimensions", []):
         metric_names.append(f"{m['name']} — {m['rubric'][:80]}")
 
+    # Gather enriched context from worst-scoring samples
+    samples_context = ""
+    if latest_run_id:
+        samples_context = _get_worst_samples_context(latest_run_id)
+        if samples_context:
+            sample_names = re.findall(r'SAMPLE: (\S+)', samples_context)
+            print(f"  Enriched context: {len(sample_names)} worst samples: {', '.join(sample_names)}")
+
     system_prompt = """You are an autonomous prompt engineer optimising a skill file (a set of instructions for an LLM).
 
 Your job:
-1. Analyse the recent evaluation results to find the weakest 2-3 metrics
-2. Form a hypothesis about why those metrics are weak
+1. Analyse the recent evaluation results AND the worst-scoring sample outputs to find concrete weaknesses
+2. Form a hypothesis about why those metrics are weak, grounded in what the samples actually got wrong
 3. Make ONE targeted change to the skill file to improve the weakest area
 4. Return the FULL modified skill file
 
 Rules:
 - Make only ONE change per iteration
 - Keep the YAML frontmatter intact
+- Keep all section headers (# headings) from the original
 - Keep the skill under 2000 words
 - Don't make changes so large you can't attribute the score change
 
@@ -142,15 +264,24 @@ IMPORTANT: The last 5 changes were all discarded. Try a FUNDAMENTALLY different 
 {results_context}
 
 The metrics being evaluated are:
-{chr(10).join(f'- {m}' for m in metric_names)}
+{chr(10).join(f'- {m}' for m in metric_names)}"""
+
+    if samples_context:
+        user_prompt += f"""
+
+Here are the worst-scoring samples and the judge's reasoning for each:
+
+{samples_context}"""
+
+    user_prompt += f"""
 
 Here is the current skill file:
 
 {current_skill}
 
-Analyse the weakest metrics, hypothesise why they're weak, and make ONE targeted change to improve them. Return the full modified skill file."""
+Analyse the weakest metrics and the concrete failures in the sample outputs. Hypothesise why they're weak and make ONE targeted change. Return the full modified skill file."""
 
-    response = client.generate(system_prompt, user_prompt)
+    response = client.generate(system_prompt, user_prompt, max_tokens=8192)
 
     # Parse response
     description = ""
@@ -164,17 +295,17 @@ Analyse the weakest metrics, hypothesise why they're weak, and make ONE targeted
     if skill_match:
         new_skill = skill_match.group(1).strip()
 
-    if new_skill and len(new_skill) > 50:
+    if new_skill and _check_skill_completeness(current_skill, new_skill):
         skill_path.write_text(new_skill, encoding="utf-8")
     elif new_skill:
-        print(f"Warning: LLM returned suspiciously short skill ({len(new_skill)} chars), skipping write", file=sys.stderr)
+        print(f"Warning: LLM returned incomplete/corrupted skill ({len(new_skill)} chars), skipping write", file=sys.stderr)
 
     return sanitise_description(description) or "Automated modification"
 
 
 def update_decision(results_tsv: Path, decision: str):
-    """Update the decision column of the last row in results.tsv."""
-    lines = results_tsv.read_text(encoding="utf-8").rstrip("\n").split("\n")
+    """Update the decision column of the last row in results.tsv (atomic write)."""
+    lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
     if len(lines) > 1:
         last = lines[-1]
         if last.endswith("\t"):
@@ -183,7 +314,15 @@ def update_decision(results_tsv: Path, decision: str):
             parts = last.split("\t")
             parts[-1] = decision
             lines[-1] = "\t".join(parts)
-        results_tsv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        content = "\n".join(lines) + "\n"
+        # Atomic write: write to temp file, then rename
+        tmp_path = results_tsv.with_suffix(".tsv.tmp")
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+            tmp_path.rename(results_tsv)
+        except OSError as e:
+            print(f"Warning: Atomic write failed ({e}), falling back to direct write", file=sys.stderr)
+            results_tsv.write_text(content, encoding="utf-8")
 
 
 def _write_status(
@@ -350,37 +489,43 @@ def print_run_summary(results_tsv: Path, start_time: float, client, iterations_r
     print(f"  Summary written to .tmp/run-summary.md\n")
 
 
+def aggregate_token_usage() -> tuple[int, int]:
+    """Read all per-process token usage logs and return (total_input, total_output)."""
+    total_in, total_out = 0, 0
+    log_dir = PROJECT_ROOT / ".tmp"
+    if not log_dir.exists():
+        return total_in, total_out
+    for log_file in log_dir.glob("token_usage_*.jsonl"):
+        try:
+            for line in log_file.read_text(encoding="utf-8").strip().split("\n"):
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    total_in += entry.get("input", 0)
+                    total_out += entry.get("output", 0)
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            continue
+    return total_in, total_out
+
+
+def get_total_cost(client: ModelClient) -> float:
+    """Get total estimated cost across all processes (modifier + subprocesses)."""
+    sub_in, sub_out = aggregate_token_usage()
+    # Combine subprocess tokens with the modifier client's own tokens
+    total_in = client.total_input_tokens + sub_in
+    total_out = client.total_output_tokens + sub_out
+    for prefix, (input_price, output_price) in client._PRICING.items():
+        if client.model.startswith(prefix):
+            return total_in * input_price + total_out * output_price
+    return 0.0
+
+
 def _default_dimensions():
     """Default LLM judge dimensions for quick-start mode."""
-    return [
-        {
-            "name": "human_score",
-            "weight": 0.30,
-            "direction": "higher_is_better",
-            "rubric": (
-                "Does this read like a competent human wrote it? "
-                "1 = obviously AI-generated, 5 = indistinguishable from human."
-            ),
-        },
-        {
-            "name": "task_accuracy",
-            "weight": 0.40,
-            "direction": "higher_is_better",
-            "rubric": (
-                "Does the output correctly follow the skill instructions? "
-                "1 = ignores them, 5 = perfect adherence."
-            ),
-        },
-        {
-            "name": "quality",
-            "weight": 0.30,
-            "direction": "higher_is_better",
-            "rubric": (
-                "Is this high-quality output overall? "
-                "1 = poor, 5 = excellent."
-            ),
-        },
-    ]
+    return default_dimensions()
 
 
 _PROVIDER_DEFAULTS = {
@@ -486,12 +631,21 @@ With existing config:
     max_hours = args.hours or cfg.get("max_hours", 0)
     max_cost_usd = cfg.get("max_cost_usd", 0)
     convergence_window = cfg.get("convergence_window", 0)
+    min_improvement = cfg.get("min_improvement", 0.01)
+
+    # Self-judge warning
+    if not cfg.get("judge_provider"):
+        print("Note: Using same model for generation and judging. For better signal, set judge_provider in config.yaml.")
 
     start_time = time.time()
     iteration = 0
     iter_times = []
     consecutive_discards = 0
     iterations_since_improvement = 0
+
+    # Clear stale token usage logs from prior runs
+    for old_log in (PROJECT_ROOT / ".tmp").glob("token_usage_*.jsonl"):
+        old_log.unlink(missing_ok=True)
 
     # Baseline if needed
     if not results_tsv.exists() or len(results_tsv.read_text(encoding="utf-8").strip().split("\n")) <= 1:
@@ -513,8 +667,9 @@ With existing config:
             if elapsed_hours >= max_hours:
                 print(f"\nReached max hours ({max_hours}h). Stopping.")
                 break
-        if max_cost_usd and client.estimated_cost_usd >= max_cost_usd:
-            print(f"\nReached cost cap (${client.estimated_cost_usd:.2f} >= ${max_cost_usd:.2f}). Stopping.")
+        total_cost = get_total_cost(client)
+        if max_cost_usd and total_cost >= max_cost_usd:
+            print(f"\nReached cost cap (${total_cost:.2f} >= ${max_cost_usd:.2f}). Stopping.")
             break
         if convergence_window and iterations_since_improvement >= convergence_window:
             print(f"\nConverged — no improvement in {convergence_window} iterations. Stopping.")
@@ -528,12 +683,18 @@ With existing config:
         best_score = get_best_score(results_tsv)
         results_context = get_recent_results(results_tsv)
 
+        # Get latest run_id for enriched context
+        latest_run_id = get_latest_run_id(results_tsv)
+
         # Analyse and modify
         force_radical = consecutive_discards >= 5
         if force_radical:
             print("5 consecutive discards — forcing fundamentally different approach...")
         print("Analysing weaknesses and modifying skill...")
-        description = analyse_and_modify(client, skill_path, results_context, cfg, force_radical=force_radical)
+        description = analyse_and_modify(
+            client, skill_path, results_context, cfg,
+            force_radical=force_radical, latest_run_id=latest_run_id,
+        )
         print(f"Change: {description}")
 
         # Snapshot SKILL.md before evaluation
@@ -551,16 +712,18 @@ With existing config:
             continue
 
         new_score = agg["composite_score"]
+        delta = new_score - best_score
 
-        # Decide
-        if new_score > best_score:
-            print(f"KEEP — score improved {best_score:.4f} → {new_score:.4f}")
+        # Decide (require min_improvement to filter noise)
+        if delta > min_improvement:
+            print(f"KEEP — score improved {best_score:.4f} → {new_score:.4f} (delta {delta:.4f} > threshold {min_improvement})")
             shutil.copy2(skill_path, skill_best)
             update_decision(results_tsv, "KEEP")
             consecutive_discards = 0
             iterations_since_improvement = 0
         else:
-            print(f"DISCARD — {new_score:.4f} vs best {best_score:.4f}")
+            reason = f"delta {delta:.4f} below threshold {min_improvement}" if delta > 0 else f"{new_score:.4f} vs best {best_score:.4f}"
+            print(f"DISCARD — {reason}")
             shutil.copy2(skill_best, skill_path)
             update_decision(results_tsv, "DISCARD")
             consecutive_discards += 1
@@ -577,7 +740,7 @@ With existing config:
         avg_secs = sum(iter_times) / len(iter_times)
         remaining = max_iterations - iteration if max_iterations else 0
         eta_m = int(avg_secs * remaining / 60) if remaining > 0 else 0
-        cost = client.estimated_cost_usd
+        cost = get_total_cost(client)
 
         eta_str = f"~{eta_m} min remaining · " if max_iterations and remaining > 0 else ""
         print(f"\n  {run_id} completed in {iter_m}m {iter_s}s")
