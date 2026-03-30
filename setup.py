@@ -17,12 +17,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import yaml
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+from utils import load_env, default_dimensions
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +80,16 @@ def ask_multiline(prompt: str) -> str:
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Sanitisation helpers
+# ---------------------------------------------------------------------------
+
+def _sanitise_prompt_id(raw_id: str, fallback: str = "prompt") -> str:
+    """Sanitise a prompt ID to safe filename characters (alphanumeric, underscore, hyphen)."""
+    sanitised = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_id).strip('_')
+    return sanitised if sanitised else fallback
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +436,8 @@ Generate 5-10 diverse test prompts that would thoroughly evaluate this skill. Re
                 continue
             p.setdefault("id", f"prompt_{i + 1}")
             p.setdefault("genre", "general")
+            # Sanitise prompt ID to safe filename characters
+            p["id"] = _sanitise_prompt_id(p["id"], fallback=f"prompt_{i + 1}")
             valid_prompts.append(p)
 
         if not valid_prompts:
@@ -454,32 +469,7 @@ Generate 5-10 diverse test prompts that would thoroughly evaluate this skill. Re
 # ---------------------------------------------------------------------------
 
 def _default_dimensions() -> list[dict]:
-    return [
-        {
-            "name": "human_score",
-            "weight": 0.30,
-            "rubric": (
-                "Does this read like a competent human wrote it? "
-                "1 = obviously AI-generated, 5 = indistinguishable from human."
-            ),
-        },
-        {
-            "name": "task_accuracy",
-            "weight": 0.40,
-            "rubric": (
-                "Does the output correctly follow the skill instructions? "
-                "1 = ignores them, 5 = perfect adherence."
-            ),
-        },
-        {
-            "name": "quality",
-            "weight": 0.30,
-            "rubric": (
-                "Is this high-quality output overall? "
-                "1 = poor, 5 = excellent."
-            ),
-        },
-    ]
+    return default_dimensions()
 
 
 _DEFAULT_PROMPTS = [
@@ -685,13 +675,7 @@ Examples:
         provider, model, api_key_env = provider_map[provider_choice]
 
         # Load API key from .env or environment
-        env_path = PROJECT_ROOT / ".env"
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, _, v = line.partition("=")
-                    os.environ.setdefault(k.strip(), v.strip())
+        load_env(PROJECT_ROOT / ".env")
 
         api_key = os.environ.get(api_key_env, "")
         if not api_key:
