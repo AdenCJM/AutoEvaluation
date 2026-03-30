@@ -10,23 +10,12 @@ Point it at any LLM instruction set. Go to bed. Wake up with a measurably better
 
 ## How it works
 
-```
-    +-------------------------------------------+
-    |           OPTIMISATION LOOP                |
-    |                                           |
-    |   +----------+      +----------+          |
-    |   | Analyse  |----->|  Modify  |          |
-    |   | weakness |      | SKILL.md |          |
-    |   | + judge  |      +-----+----+          |
-    |   | reasoning|            |               |
-    |   +-----^----+      +-----v----+          |
-    |         |           | Evaluate |          |
-    |         |           | samples  |          |
-    |   +-----+----+     +-----+----+          |
-    |   |  Decide  |<----------+               |
-    |   | keep/rev |                            |
-    |   +----------+                            |
-    +-------------------------------------------+
+```mermaid
+graph LR
+    A["Analyse<br/>weakness + judge reasoning"] --> B["Modify<br/>SKILL.md"]
+    B --> C["Evaluate<br/>samples"]
+    C --> D["Decide<br/>keep / revert"]
+    D --> A
 ```
 
 1. **Analyse** — reads the weakest metrics AND the actual sample outputs that scored poorly, including the judge's reasoning for each score. The modifier sees *why* scores are low, not just numbers.
