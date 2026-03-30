@@ -5,12 +5,69 @@ Common functions used across the AutoEvaluation toolchain.
 Centralises config loading, path resolution, and validation.
 """
 
+import os
 import re
 import sys
 import yaml
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+
+
+def load_env(env_path: Path = None) -> None:
+    """Load a .env file into os.environ (if it exists).
+
+    Handles KEY=value, KEY="value", and KEY='value' formats.
+    Does not overwrite existing env vars.
+    """
+    if env_path is None:
+        env_path = PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # Strip matching quotes
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def default_dimensions() -> list[dict]:
+    """Default LLM judge dimensions used by setup.py and run_loop.py."""
+    return [
+        {
+            "name": "human_score",
+            "weight": 0.30,
+            "direction": "higher_is_better",
+            "rubric": (
+                "Does this read like a competent human wrote it? "
+                "1 = obviously AI-generated, 5 = indistinguishable from human."
+            ),
+        },
+        {
+            "name": "task_accuracy",
+            "weight": 0.40,
+            "direction": "higher_is_better",
+            "rubric": (
+                "Does the output correctly follow the skill instructions? "
+                "1 = ignores them, 5 = perfect adherence."
+            ),
+        },
+        {
+            "name": "quality",
+            "weight": 0.30,
+            "direction": "higher_is_better",
+            "rubric": (
+                "Is this high-quality output overall? "
+                "1 = poor, 5 = excellent."
+            ),
+        },
+    ]
 
 
 def load_config(config_path: str = None) -> dict:

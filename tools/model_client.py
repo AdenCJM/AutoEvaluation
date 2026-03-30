@@ -13,23 +13,17 @@ Usage:
     response = client.generate("You are a helpful assistant.", "Write a haiku.")
 """
 
+import json
 import os
 import random
 import sys
+import threading
 import time
 import yaml
 from pathlib import Path
 
-
-def _load_env():
-    """Load .env file from project root."""
-    env_path = Path(__file__).parent.parent / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, _, value = line.partition("=")
-                os.environ.setdefault(key.strip(), value.strip())
+sys.path.insert(0, str(Path(__file__).parent))
+from utils import PROJECT_ROOT, load_env
 
 
 class ModelClient:
@@ -56,7 +50,8 @@ class ModelClient:
         self.api_key_env = api_key_env
         self.total_input_tokens = 0
         self.total_output_tokens = 0
-        _load_env()
+        self._token_lock = threading.Lock()
+        load_env()
         self.api_key = os.environ.get(api_key_env)
         if not self.api_key:
             print(
@@ -175,6 +170,23 @@ class ModelClient:
             pass
         return (0, 0)
 
+    def _accumulate_tokens(self, inp: int, out: int) -> None:
+        """Thread-safe token accumulation + write to per-process log."""
+        with self._token_lock:
+            self.total_input_tokens += inp
+            self.total_output_tokens += out
+        # Write per-process token log for cross-subprocess aggregation
+        if inp or out:
+            log_dir = PROJECT_ROOT / ".tmp"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"token_usage_{os.getpid()}.jsonl"
+            try:
+                entry = json.dumps({"input": inp, "output": out, "model": self.model})
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(entry + "\n")
+            except OSError:
+                pass  # Best-effort, don't crash on log failure
+
     @property
     def estimated_cost_usd(self) -> float:
         """Estimated cost based on accumulated tokens and known pricing."""
@@ -211,8 +223,7 @@ class ModelClient:
                 ),
             )
             inp, out = self._extract_usage(response)
-            self.total_input_tokens += inp
-            self.total_output_tokens += out
+            self._accumulate_tokens(inp, out)
             return response.text
 
         elif self.provider == "openai":
@@ -225,8 +236,7 @@ class ModelClient:
                 max_tokens=max_tokens,
             )
             inp, out = self._extract_usage(response)
-            self.total_input_tokens += inp
-            self.total_output_tokens += out
+            self._accumulate_tokens(inp, out)
             return response.choices[0].message.content
 
         elif self.provider == "anthropic":
@@ -237,8 +247,7 @@ class ModelClient:
                 max_tokens=max_tokens,
             )
             inp, out = self._extract_usage(response)
-            self.total_input_tokens += inp
-            self.total_output_tokens += out
+            self._accumulate_tokens(inp, out)
             return response.content[0].text
 
         else:
