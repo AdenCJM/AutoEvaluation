@@ -2,39 +2,44 @@
 
 **Evals that fix themselves.**
 
-Give it a skill file, a set of test scenarios, and a scoring rubric. It runs autonomously: generate outputs, score them, find the weakest metric, rewrite the skill to fix it, re-score, keep or revert. Hill-climbing on prompt engineering, fully hands-off.
-
-> *A skill file is any plain-text instruction set for an LLM — a writing style guide, a tone of voice document, a system prompt, a coding conventions file. If it tells an AI how to behave, AutoEvaluation can improve it.*
+Give it a prompt, a set of test scenarios, and a scoring rubric. It runs autonomously: generate outputs, score them, read the judge's reasoning, find the weakest metric, rewrite the prompt to fix it, re-score, keep or revert. Hill-climbing on prompt engineering, fully hands-off.
 
 I pointed it at a writing style guide and let it run overnight. It made 20 attempts, kept 2, and improved the composite score from 0.9508 to 0.9692. The changes it made: strengthened contraction rules, added concrete before/after examples for em dash replacement. Every other LLM prompt optimiser (DSPy, TextGrad, MIPRO) requires you to write Python. This one works on plain markdown files.
 
 Point it at any LLM instruction set. Go to bed. Wake up with a measurably better prompt.
 
----
-
 ## How it works
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  OPTIMISATION LOOP                  │
-│                                                     │
-│   ┌──────────┐    ┌──────────┐    ┌──────────┐      │
-│   │ Analyse  │───▶│  Modify  │───▶│ Evaluate │      │
-│   │ weakness │    │ SKILL.md │    │ samples  │      │
-│   └──────────┘    └──────────┘    └──────────┘      │
-│        ▲                               │            │
-│        │          ┌──────────┐         │            │
-│        └──────────│  Decide  │◀────────┘            │
-│                   │ keep/rev │                      │
-│                   └──────────┘                      │
-└─────────────────────────────────────────────────────┘
+                    ┌─────────────────────────────────────────┐
+                    │           OPTIMISATION LOOP              │
+                    │                                          │
+                    │  ┌──────────┐    ┌──────────┐            │
+                    │  │ Analyse  │───▶│  Modify  │            │
+                    │  │ weakness │    │ SKILL.md │            │
+                    │  │ + judge  │    └─────┬────┘            │
+                    │  │ reasoning│          │                 │
+                    │  └────▲─────┘    ┌─────▼────┐            │
+                    │       │         │ Evaluate │            │
+                    │       │         │ samples  │            │
+                    │  ┌────┴─────┐   └─────┬────┘            │
+                    │  │  Decide  │◀────────┘                 │
+                    │  │ keep/rev │                            │
+                    │  └──────────┘                            │
+                    └─────────────────────────────────────────┘
 ```
 
-1. **Analyse** — reads the weakest metrics from the last run
-2. **Modify** — makes ONE targeted change to the skill instructions
-3. **Evaluate** — generates outputs using the modified skill, scores them against your rubric
-4. **Decide** — if the score improved, keep the change; otherwise revert
-5. **Repeat** — until the iteration/time limit is hit (or indefinitely)
+1. **Analyse** — reads the weakest metrics AND the actual sample outputs that scored poorly, including the judge's reasoning for each score. The modifier sees *why* scores are low, not just numbers.
+2. **Modify** — makes ONE targeted change to the skill instructions, grounded in concrete failure examples.
+3. **Evaluate** — generates outputs using the modified skill, scores them against your rubric.
+4. **Decide** — if the score improved above the noise threshold, keep the change; otherwise revert. Small deltas that could be random noise are filtered out.
+5. **Repeat** — until the iteration, time, or cost limit is hit (or indefinitely).
+
+### What makes this different
+
+Every other prompt optimiser treats prompts as parameters to optimise computationally. DSPy requires a Python DSL. AutoPrompt needs labelled datasets. OpenAI's optimizer is platform-locked. Meta's prompt-ops is Llama-only.
+
+AutoEvaluation treats prompts as prose documents that an LLM reads, critiques, and rewrites. No DSL. No compilation step. No framework lock-in. Just a markdown file and test prompts. It's "editor doing revision" vs "compiler doing gradient descent."
 
 ### Real results
 
@@ -48,195 +53,136 @@ exp_002     0.9600   KEEP       Strengthened contraction rule with emphasis
 exp_005     0.9692   KEEP       Added concrete em-dash before/after example
 ```
 
-18 of 20 attempts were discarded (score didn't improve). The 2 that stuck made targeted, specific changes. Total run time: ~2 hours. Total API cost: <$2.
+18 of 20 attempts were discarded (score didn't improve enough to pass the noise threshold). The 2 that stuck made targeted, specific changes. Total run time: ~2 hours. Total API cost: <$2.
 
 The full experiment history is in `examples/writing-style/sample-results.tsv`.
 
 ![AutoEvaluation dashboard showing score trend and per-metric cards](docs/dashboard.png)
 
----
-
 ## Quick start
 
-**Prerequisites:** Python 3.10+ and an API key for Gemini, OpenAI, or Anthropic.
+### Prerequisites
 
-### Option 1 — Claude Code (recommended)
+- Python 3.10+
+- An API key for your preferred LLM provider (Gemini, OpenAI, or Anthropic)
 
-No Python setup needed. Claude Code handles everything conversationally.
-
-```bash
-git clone https://github.com/AdenCJM/AutoEvaluation.git
-cd AutoEvaluation
-```
-
-Open the project in Claude Code — either open the folder in VS Code with the Claude Code extension, or run `claude` in the project directory. Then type `/autoeval` or just describe what you want:
-
-> `/autoeval`
-> *"I want to optimise my writing style guide"*
-> *"Help me set up AutoEvaluation for my email templates"*
-> *"Run the optimisation loop"*
-
-Claude walks through setup if anything is missing, runs the experiments, and reports each iteration directly in the chat:
-
-```
-Iteration 3 — exp_003
-Hypothesis: task_accuracy is low because the skill doesn't constrain email length
-Change: Added "Keep emails under 200 words" rule
-Score: 0.6420 → 0.7185 (+0.0765)  ✓ KEEP
-```
-
-You can steer mid-run at any point — "focus on the tone metric", "try removing rules instead of adding them", or "that's good enough, stop" — and Claude adjusts.
-
-**Try the included writing style example:**
-
-> *"Copy the writing style example files and run the optimisation loop"*
-
-**Already have a skill file?**
-
-> *"Here's my skill file — [paste contents or give the path] — optimise it"*
-
-Claude generates test prompts, configures the rubric, and starts the loop.
-
----
-
-### Option 2 — Headless / terminal
+### One command start
 
 ```bash
 git clone https://github.com/AdenCJM/AutoEvaluation.git
 cd AutoEvaluation
 echo "GEMINI_API_KEY=your-key" > .env
-python3 setup.py          # interactive setup wizard
-python3 tools/run_loop.py
+./start.sh
 ```
 
-> **Using OpenAI or Anthropic instead?** Set the matching key in `.env` (e.g. `OPENAI_API_KEY=your-key`) and select your provider when `setup.py` asks. See [BYO model](#byo-model).
+`start.sh` handles everything: checks your Python version, creates a virtual environment, installs only the provider SDK you need (not all three), validates your API key, runs setup if needed, and starts the optimisation loop. If anything is wrong, it tells you immediately.
 
-**Try the included writing style example:**
+### Try the included example
+
+The repo ships with a complete working example (a writing style guide):
 
 ```bash
+echo "GEMINI_API_KEY=your-key" > .env
 cp examples/writing-style/SKILL.md SKILL.md
 cp examples/writing-style/config.yaml config.yaml
 cp examples/writing-style/prompts.json prompts/prompts.json
 cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
-# Edit .env with your API key, then update config.yaml if not using Gemini
-python3 tools/run_loop.py
+./start.sh
 ```
 
-**Limit the run:**
+### Point at your own skill
+
+Already have a skill file you want to optimise? Two options:
+
+**Quick (no prompts, all defaults):**
+```bash
+echo "GEMINI_API_KEY=your-key" > .env
+python3 setup.py --defaults --skill-file /path/to/your/SKILL.md --generate-prompts
+./start.sh
+```
+
+This validates your API key, uses AI to generate test prompts from your skill file, applies sensible defaults (3 evaluation dimensions, 10 iterations), and you're running.
+
+**Guided (interactive wizard):**
+```bash
+python3 tools/run_loop.py --skill path/to/your/SKILL.md --provider gemini --iterations 10
+```
+
+This auto-generates `config.yaml` with sensible defaults and starts optimising immediately.
+
+### Setup wizard
 
 ```bash
-python3 tools/run_loop.py --iterations 10    # stop after 10 experiments
-python3 tools/run_loop.py --hours 2.5        # stop after 2.5 hours
+python3 setup.py
 ```
 
-**Watch scores in real time** — open a second terminal:
+The wizard walks you through:
+1. **Provider + model** — pick Gemini, OpenAI, or Anthropic (API key validated instantly)
+2. **Your skill** — paste or describe the instructions you want to optimise
+3. **Test prompts** — AI generates prompts from your skill description, or enter manually
+4. **Eval rubric** — set 2-5 quality dimensions (or use the defaults)
+5. **Run duration** — max iterations, max hours, or unlimited
+
+It generates: `config.yaml`, `SKILL.md`, `prompts/prompts.json`, `.env`, and `.claude/settings.json`.
+
+**Skip all prompts:**
+
+```bash
+# All defaults: Gemini, default rubric, 5 generic prompts, 10 iterations
+python3 setup.py --defaults
+
+# Defaults with a custom skill and AI-generated prompts
+python3 setup.py --defaults --skill-file SKILL.md --generate-prompts
+
+# Defaults with OpenAI instead of Gemini
+python3 setup.py --defaults --provider openai
+```
+
+**Already have a skill file?** Skip the paste step:
+
+```bash
+python3 setup.py --skill-file /path/to/your/SKILL.md
+python3 setup.py --skill-file SKILL.md --prompts-file my-prompts.json
+```
+
+### With Claude Code (autonomous)
+
+If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, it can drive the optimisation loop autonomously:
+
+```bash
+python3 setup.py    # or use --defaults
+claude -p program.md
+```
+
+Claude reads `program.md`, which contains the loop instructions. It autonomously runs experiments, modifies your skill, and tracks results. All bash commands are auto-approved via `.claude/settings.json`.
+
+### Watch scores in real time
+
+Open another terminal:
 
 ```bash
 python3 tools/dashboard_server.py
-# then open http://localhost:8050
 ```
+
+Then open http://localhost:8050 in your browser.
 
 ---
 
-## What happens during a run
+## How the optimiser thinks
 
-### 1. Baseline
+The optimisation loop doesn't just look at score numbers. For each iteration, it:
 
-The first run establishes your starting score before any changes are made:
+1. **Reads the judge's reasoning** for the 2 worst-scoring samples. Not "task_accuracy = 0.72" but "the output ignored the instruction to avoid em dashes in paragraph 3."
+2. **Reads the actual sample text** that scored poorly, so it can see the concrete failure.
+3. **Makes one targeted change** based on that specific failure, not a guess from numbers.
+4. **Validates the returned skill** hasn't been truncated or corrupted (checks frontmatter, section headers).
+5. **Filters noise**: only keeps changes where the score improvement exceeds a configurable threshold (default 1%), so random variance doesn't pollute the skill.
 
-```
-[1/3] Generating samples...
-  [1/5] intro_email (cold outreach)... done (187 words, 3.2s)
-  ...
-[2/3] Running LLM judge evaluation...
-[3/3] Aggregating scores...
-COMPOSITE SCORE: 0.6420
-```
-
-### 2. Optimisation iterations
-
-The loop analyses weaknesses, modifies `SKILL.md`, and re-evaluates. Changes that improve the score are kept; the rest are reverted:
-
-```
-exp_001  COMPOSITE SCORE: 0.7185  KEEP    (added email length constraint)
-exp_002  COMPOSITE SCORE: 0.7340  KEEP
-exp_003  COMPOSITE SCORE: 0.7120  DISCARD (reverted)
-exp_004  COMPOSITE SCORE: 0.7510  KEEP
-...
-```
-
-### 3. End-of-run summary
-
-When the run finishes, a summary is printed to the terminal and saved to `.tmp/run-summary.md`:
-
-```
-============================================================
-  RUN COMPLETE
-============================================================
-  Iterations run:   10
-  Time elapsed:     18m 42s
-  Cost estimate:    $0.04
-
-  Baseline score:   0.6420
-  Best score:       0.7510  (+0.1090)
-
-  Kept changes (3):
-  · [exp_001] Added email length constraint
-  · [exp_002] Strengthened tone instruction with example
-  · [exp_004] Moved most-violated rules to top
-
-  Best skill saved: SKILL.md.best
-  To deploy:        cp SKILL.md.best ~/.claude/skills/my-skill/SKILL.md
-============================================================
-```
-
-`SKILL.md.best` always holds the highest-scoring version found during the run. `SKILL.md` is also updated to match it.
-
-### 4. Deploying the result
-
-Once the run is done, you need to put the optimised skill somewhere it will be used.
-
-**With Claude Code:** Claude automatically offers to deploy at the end of the run. It reads the skill name from the frontmatter and asks:
-
-> *"Deploy the optimised skill to `~/.claude/skills/writing-style/SKILL.md`? This replaces the version Claude Code uses globally."*
-
-Confirm and it copies the file. Claude Code picks it up immediately — no restart needed.
-
-**Headless:** The summary prints the exact `cp` command to run. Copy and paste it:
-
-```bash
-cp SKILL.md.best ~/.claude/skills/writing-style/SKILL.md
-```
-
-If the skill doesn't exist yet in your skills directory, create it first:
-
-```bash
-mkdir -p ~/.claude/skills/my-skill
-cp SKILL.md.best ~/.claude/skills/my-skill/SKILL.md
-```
+This means the headless mode (`run_loop.py`) is just as effective as the Claude Code mode. Both see the same signal.
 
 ---
 
-## Setting up your skill
-
-### The skill file
-
-`SKILL.md` is the file being optimised. It uses YAML frontmatter to identify itself:
-
-```markdown
----
-name: my-skill
-description: One sentence describing when to use this skill.
----
-
-# My Skill Rules
-
-Your instructions go here...
-```
-
-The `name` field is used at the end of the run to find the right place to deploy the result. It should match the folder name under `~/.claude/skills/`.
-
-### Test prompts
+## Test prompts
 
 Test prompts are realistic tasks that exercise your skill. Create `prompts/prompts.json`:
 
@@ -256,46 +202,20 @@ Test prompts are realistic tasks that exercise your skill. Create `prompts/promp
 ```
 
 Each prompt needs:
-- `id` — short identifier (used in filenames)
+- `id` — short identifier (alphanumeric, underscores, hyphens; auto-sanitised)
 - `genre` — category (used for context in evaluation)
-- `prompt` — the actual task the LLM performs using your skill
+- `prompt` — the actual task the LLM will perform using your skill
 
-Aim for 5–10 prompts covering different aspects of your skill. More prompts give more reliable scores, but each one costs an LLM call per iteration.
-
-### Scoring rubric
-
-The rubric is defined in `config.yaml`. Each dimension has a name, weight, direction, and description for the LLM judge:
-
-```yaml
-llm_judge_dimensions:
-  - name: task_accuracy
-    weight: 0.40
-    direction: higher_is_better
-    rubric: "Does the output correctly follow the skill instructions? 1=ignores them, 5=perfect adherence."
-  - name: quality
-    weight: 0.30
-    direction: higher_is_better
-    rubric: "Is this high-quality output overall? 1=poor, 5=excellent."
-  - name: human_score
-    weight: 0.30
-    direction: higher_is_better
-    rubric: "Does this read like a competent human wrote it? 1=obviously AI, 5=indistinguishable."
-```
-
-Weights must sum to 1.0 (auto-normalised with a warning if not).
+Aim for 5-10 prompts that cover different aspects of your skill. More prompts = more reliable scores, but each one costs an LLM call per iteration.
 
 ---
 
-## Configuration
+## BYO model
 
-All settings live in `config.yaml`. Run `python3 setup.py` to generate it interactively, or create it manually using `config.template.yaml` as a reference.
-
-### BYO model
-
-AutoEvaluation works with Gemini, OpenAI, and Anthropic. Set your provider in `config.yaml`:
+AutoEvaluation works with any LLM provider. Set your provider in `config.yaml`:
 
 ```yaml
-# Gemini (default)
+# Gemini
 provider: gemini
 model: gemini-2.5-flash
 api_key_env: GEMINI_API_KEY
@@ -307,30 +227,56 @@ api_key_env: OPENAI_API_KEY
 
 # Anthropic
 provider: anthropic
-model: claude-sonnet-4-5
+model: claude-sonnet-4-20250514
 api_key_env: ANTHROPIC_API_KEY
 ```
 
-Add your key to `.env`:
-
+Add your API key to `.env`:
 ```
 OPENAI_API_KEY=sk-abc123...
 ```
 
-To add a custom provider, edit `tools/model_client.py` — it's a single file with an `elif` block per provider.
+To add a custom provider, edit `tools/model_client.py`. It's a single file with an `elif` block per provider.
 
-### Run limits
+---
 
-Control how long the loop runs:
+## Run duration
 
-```yaml
-max_iterations: 20    # stop after 20 experiments (0 = unlimited)
-max_hours: 2.5        # stop after 2.5 hours (0 = unlimited)
-max_cost_usd: 5.00    # stop when estimated spend exceeds $5 (0 = unlimited)
-convergence_window: 10  # stop after 10 iterations with no improvement (0 = disabled)
+Control how long the loop runs via CLI flags or `config.yaml`:
+
+```bash
+python3 tools/run_loop.py --iterations 20
+python3 tools/run_loop.py --hours 2.5
 ```
 
-If multiple limits are set, whichever is hit first stops the loop.
+Or in `config.yaml`:
+```yaml
+max_iterations: 20    # stop after 20 experiments
+max_hours: 2.5        # stop after 2.5 hours
+```
+
+If both are set, whichever limit is hit first stops the loop. Set both to `0` for unlimited.
+
+---
+
+## Custom deterministic metrics (advanced)
+
+By default, AutoEvaluation uses LLM-as-judge for all evaluation. If you want rule-based metrics too:
+
+1. Create a custom `tools/eval_deterministic.py` that returns JSON:
+   ```python
+   {"metric_name": {"score": 0.85, ...}, "another_metric": {"score": 0.92, ...}}
+   ```
+2. Add them to `config.yaml`:
+   ```yaml
+   deterministic_metrics:
+     - name: metric_name
+       weight: 0.15
+     - name: another_metric
+       weight: 0.10
+   ```
+
+See `examples/writing-style/` for a full example with 9 deterministic metrics.
 
 ---
 
@@ -338,7 +284,7 @@ If multiple limits are set, whichever is hit first stops the loop.
 
 ### Separate judge model
 
-By default, the same model generates outputs and evaluates them — which creates self-judging bias. Use a different model for evaluation:
+By default, the same model generates outputs and evaluates them. This creates self-judging bias (the tool will warn you about this). Use a different model for evaluation:
 
 ```yaml
 judge_provider: openai
@@ -346,52 +292,63 @@ judge_model: gpt-4o
 judge_api_key_env: OPENAI_API_KEY
 ```
 
-If these keys are absent, the primary provider is used as fallback.
+If these keys are absent, the primary provider is used as a fallback, with a warning.
 
 ### Semi-blind judge
 
-The judge normally evaluates outputs blind — it doesn't see your `SKILL.md`. Enable semi-blind mode to give the judge context for the `task_accuracy` dimension only:
+The judge normally evaluates outputs blind. Enable semi-blind mode to give the judge context for the `task_accuracy` dimension only:
 
 ```yaml
 judge_sees_skill: true
 ```
 
-Other dimensions (quality, human_score, etc.) stay blind.
+Other dimensions (quality, human_score, etc.) are still evaluated blind.
 
-### Custom deterministic metrics
+### Noise filtering
 
-By default, AutoEvaluation uses LLM-as-judge for all evaluation. For rule-based metrics (e.g. word count, banned phrase detection, regex checks):
+The optimiser only keeps changes where the score improvement exceeds a minimum threshold. This prevents random judge variance from polluting the skill.
 
-1. Edit `tools/eval_deterministic.py` to return JSON:
-   ```python
-   {"word_count": {"score": 0.85}, "banned_phrases": {"score": 0.92}}
-   ```
-2. Add the metrics to `config.yaml`:
-   ```yaml
-   deterministic_metrics:
-     - name: word_count
-       weight: 0.15
-     - name: banned_phrases
-       weight: 0.10
-   ```
+```yaml
+min_improvement: 0.01   # only keep changes with delta > 1% (default)
+```
 
-See `examples/writing-style/` for a full example with 9 deterministic metrics.
+Set to `0` to keep any positive improvement (original behaviour). The convergence window also respects this threshold, so convergence detection actually works with noisy judges.
+
+### Convergence detection
+
+Stop automatically when the optimiser plateaus:
+
+```yaml
+convergence_window: 10   # stop after 10 iterations with no improvement above threshold
+```
+
+Set to `0` to disable (default).
+
+### Cost capping
+
+Set a budget limit on estimated API spend:
+
+```yaml
+max_cost_usd: 5.00   # stop when estimated cost exceeds $5
+```
+
+Cost is tracked accurately across all subprocesses (generation, evaluation, and the modifier), not just the modifier. Set to `0` for unlimited (default).
 
 ### Parallel execution
 
 Speed up generation and evaluation by running multiple LLM calls concurrently:
 
 ```yaml
-max_concurrent: 4   # run 4 API calls in parallel (default: 1)
+max_concurrent: 4   # run 4 API calls in parallel
 ```
 
-Partial failures are handled gracefully — if 1 of 10 calls fails, the other 9 still count.
+Partial failures are handled gracefully. If 1 of 10 calls fails, the other 9 still count. Set to `1` for serial execution (default).
 
 ---
 
 ## Always-on mode (GitHub Actions)
 
-Run the optimisation on a schedule without keeping a terminal open:
+Want the optimisation to run on a schedule? Copy the included workflow into your repo:
 
 ```bash
 mkdir -p .github/workflows
@@ -400,12 +357,78 @@ cp examples/github-actions/optimise.yml .github/workflows/optimise.yml
 
 Then:
 1. Push to GitHub
-2. Go to **Settings → Secrets → Actions** and add a secret called `LLM_API_KEY`
-3. The workflow runs daily at 2am UTC, or trigger it manually from the Actions tab
+2. Go to **Settings > Secrets > Actions** and add a secret called `LLM_API_KEY` with your API key
+3. The workflow runs daily at 2am UTC (or trigger it manually from the Actions tab)
 
 Each run checks out the repo, runs N iterations, and commits the updated `SKILL.md.best` and `results.tsv`.
 
-See `examples/github-actions/README.md` for full setup and schedule customisation.
+See `examples/github-actions/README.md` for full setup instructions and schedule customisation.
+
+---
+
+## Example interaction flow
+
+Here's what happens when you run the optimisation loop.
+
+### 1. Baseline
+
+The first run establishes your starting score:
+
+```
+[1/3] Generating samples...
+  [1/5] Generating: intro_email (cold outreach)... done (187 words, 3.2s)
+  ...
+[2/3] Running LLM judge evaluation...
+[3/3] Aggregating scores...
+COMPOSITE SCORE: 0.6420
+Note: Using same model for generation and judging. For better signal, set judge_provider in config.yaml.
+```
+
+### 2. Optimisation iterations
+
+The loop reads the judge's reasoning, analyses weaknesses, modifies `SKILL.md`, and re-evaluates:
+
+```
+Enriched context: 2 worst samples: sample_3_quick_reply, sample_0_intro_email
+Analysing weaknesses and modifying skill...
+Change: Added "Keep emails under 200 words" rule
+Running exp_001...
+COMPOSITE SCORE: 0.7185
+KEEP — score improved 0.6420 → 0.7185 (delta 0.0765 > threshold 0.01)
+```
+
+```
+Running exp_002... COMPOSITE SCORE: 0.7340 — KEEP
+Running exp_003... COMPOSITE SCORE: 0.7120 — DISCARD (delta 0.0000 below threshold 0.01)
+Running exp_004... COMPOSITE SCORE: 0.7510 — KEEP
+...
+Optimisation complete — 20 iterations in 1.3 hours
+Best score: 0.7510
+```
+
+### 3. Results
+
+```
+============================================================
+  RUN COMPLETE
+============================================================
+  Iterations run:   20
+  Time elapsed:     1h 23m 15s
+  Cost estimate:    $1.4200
+  Tokens used:      2,100,000 in / 890,000 out
+
+  Baseline score:   0.6420
+  Best score:       0.7510  (+0.1090)
+
+  Kept changes (4):
+  · [exp_001] Added email length constraint
+  · [exp_002] Specified greeting format
+  · [exp_004] Added concrete example of good vs bad sign-off
+  · [exp_012] Restructured rules by priority
+
+  Best skill saved: SKILL.md.best
+============================================================
+```
 
 ---
 
@@ -413,36 +436,37 @@ See `examples/github-actions/README.md` for full setup and schedule customisatio
 
 ```
 autoevaluation/
-├── setup.py                  # Interactive setup wizard
-├── config.yaml               # All settings (generated by setup.py)
+├── setup.py                  # Setup wizard (also accepts --skill-file flags)
+├── start.sh                  # Zero-friction entry point
+├── config.yaml               # All settings (generated by setup.py or --skill flag)
 ├── config.template.yaml      # Reference config with all options documented
-├── program.md                # Loop instructions (read by Claude Code)
-├── SKILL.md                  # The skill being optimised
-├── SKILL.md.best             # Highest-scoring version found (auto-managed)
-├── results.tsv               # Full experiment history (append-only)
-├── .env                      # API keys (git-ignored)
-├── .claude/
-│   └── skills/autoeval/      # /autoeval slash command (auto-installed)
+├── program.md                # Loop instructions for Claude Code
+├── SKILL.md                  # The skill being optimised (your instructions)
+├── SKILL.md.best             # Current best version (auto-managed)
+├── results.tsv               # Full experiment history
+├── .env                      # API key (git-ignored)
+├── .env.example              # Template showing required keys
+├── .claude/settings.json     # Auto-approve rules for Claude Code (gitignored)
 ├── prompts/
 │   └── prompts.json          # Test scenarios
 ├── tools/
-│   ├── utils.py              # Shared utilities (config loading, validation)
-│   ├── model_client.py       # LLM provider abstraction (retry, token tracking)
-│   ├── experiment_runner.py  # Orchestrator: one full eval cycle
-│   ├── generate_samples.py   # Sample generator
+│   ├── utils.py              # Shared utilities (config, env loading, validation)
+│   ├── model_client.py       # LLM provider abstraction (retry, token tracking, cost)
+│   ├── experiment_runner.py  # Orchestrator (one eval cycle)
+│   ├── generate_samples.py   # Sample generator (supports parallel)
 │   ├── eval_deterministic.py # Rule-based metrics (optional, customisable)
-│   ├── eval_llm_judge.py     # LLM-as-judge scoring
+│   ├── eval_llm_judge.py     # LLM-as-judge metrics
 │   ├── score_aggregator.py   # Weighted composite scoring
-│   ├── run_loop.py           # Headless loop driver
-│   └── dashboard_server.py   # Live score dashboard (localhost:8050)
+│   ├── run_loop.py           # Standalone loop driver (headless)
+│   └── dashboard_server.py   # Live score dashboard
+├── tests/
+│   └── test_smoke.py         # 68 tests (import, config, judge parsing, aggregation, loop logic)
 ├── examples/
-│   ├── writing-style/        # Complete example: anti-AI writing style
+│   ├── writing-style/        # Full example: anti-AI writing style
 │   └── github-actions/       # GitHub Actions workflow (opt-in)
 └── .gitignore
 ```
 
----
-
 ## Acknowledgment
 
-This project is inspired by [Karpathy's AutoResearch](https://github.com/karpathy/autoresearch), which explores autonomous research workflows. AutoEvaluation borrows the core idea of an autonomous optimisation loop but applies it to prompt engineering: making LLM instructions measurably better through iterative hill-climbing. It doesn't implement or extend AutoResearch's original scope — it's a separate tool that took the concept and ran with it in a new direction.
+This project is inspired by [Karpathy's AutoResearch](https://github.com/karpathy/autoresearch), which explores autonomous research workflows. AutoEvaluation borrows the core idea of an autonomous optimisation loop but applies it to a different problem: making LLM instructions measurably better through iterative prompt engineering.
