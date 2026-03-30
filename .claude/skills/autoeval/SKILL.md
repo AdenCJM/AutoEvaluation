@@ -9,6 +9,14 @@ Autonomous skill optimisation through iterative evaluation and hill-climbing.
 
 This skill has **three phases**: interactive setup → dashboard launch → autopilot execution.
 
+## Interaction Rules
+
+**All user-facing questions MUST use the `AskUserQuestion` tool** — never ask questions as plain text in chat. This tool renders clickable button options in the UI, which is the expected user experience.
+
+When this document says "use AskUserQuestion", it means: call the `AskUserQuestion` tool with a `questions` array containing objects with `question`, `header`, `options` (each with `label` and `description`), and `multiSelect` fields.
+
+If you recommend a specific option, make it the first option and append "(Recommended)" to its label.
+
 ---
 
 ## Phase 1: Interactive Setup
@@ -19,16 +27,24 @@ Before running anything, have a conversation with the user to understand what th
 
 Look for `config.yaml` and `results.tsv` in the current directory.
 
-- If **both exist** and `results.tsv` has data rows: use AskUserQuestion:
+- If **both exist** and `results.tsv` has data rows, call the `AskUserQuestion` tool. Example of the exact tool parameters (all subsequent questions in this document follow the same pattern):
 
-  Question: "I found an existing run with N experiments. What would you like to do?"
-  Header: "Existing run"
-  Options:
-  - A) Resume — pick up where I left off (Recommended)
-  - B) Start fresh — set up a new skill
+  ```json
+  {
+    "questions": [{
+      "question": "I found an existing run with N experiments. What would you like to do?",
+      "header": "Existing run",
+      "multiSelect": false,
+      "options": [
+        { "label": "Resume (Recommended)", "description": "Pick up where I left off" },
+        { "label": "Start fresh", "description": "Set up a new skill from scratch" }
+      ]
+    }]
+  }
+  ```
 
-  If A → skip to Phase 2
-  If B → continue with setup questions below
+  If Resume → skip to Phase 2
+  If Start fresh → continue with setup questions below
 
 - If **config.yaml exists** but no `results.tsv`: use AskUserQuestion:
 
