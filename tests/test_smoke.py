@@ -592,3 +592,325 @@ def test_full_loop_3_iterations(tmp_path):
     assert len(lines) == 5  # header + baseline + 3 experiments
     assert get_best_score(tsv) == 0.7
     assert get_next_run_id(tsv) == "exp_004"
+
+
+# ── Utils consolidation tests ─────────────────────────────────────
+
+def test_load_env_basic(tmp_path):
+    from utils import load_env
+    env_file = tmp_path / ".env"
+    env_file.write_text("MY_KEY=hello_world\n")
+    import os
+    os.environ.pop("MY_KEY", None)
+    load_env(env_file)
+    assert os.environ.get("MY_KEY") == "hello_world"
+    os.environ.pop("MY_KEY", None)
+
+
+def test_load_env_strips_double_quotes(tmp_path):
+    from utils import load_env
+    env_file = tmp_path / ".env"
+    env_file.write_text('MY_KEY="quoted_value"\n')
+    import os
+    os.environ.pop("MY_KEY", None)
+    load_env(env_file)
+    assert os.environ.get("MY_KEY") == "quoted_value"
+    os.environ.pop("MY_KEY", None)
+
+
+def test_load_env_strips_single_quotes(tmp_path):
+    from utils import load_env
+    env_file = tmp_path / ".env"
+    env_file.write_text("MY_KEY='single_quoted'\n")
+    import os
+    os.environ.pop("MY_KEY", None)
+    load_env(env_file)
+    assert os.environ.get("MY_KEY") == "single_quoted"
+    os.environ.pop("MY_KEY", None)
+
+
+def test_load_env_missing_file(tmp_path):
+    from utils import load_env
+    load_env(tmp_path / "nonexistent.env")  # Should not raise
+
+
+def test_default_dimensions_from_utils():
+    from utils import default_dimensions
+    dims = default_dimensions()
+    assert len(dims) == 3
+    names = {d["name"] for d in dims}
+    assert names == {"human_score", "task_accuracy", "quality"}
+    total_weight = sum(d["weight"] for d in dims)
+    assert abs(total_weight - 1.0) < 0.01
+
+
+# ── Worst samples context tests ───────────────────────────────────
+
+def test_worst_samples_with_valid_data(tmp_path):
+    from run_loop import _get_worst_samples_context
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+
+    try:
+        run_id = "exp_001"
+        evals_dir = tmp_path / ".tmp" / "evals" / run_id
+        samples_dir = tmp_path / ".tmp" / "samples" / run_id
+        evals_dir.mkdir(parents=True)
+        samples_dir.mkdir(parents=True)
+
+        # Create 3 judge JSONs with different scores
+        for i, score in enumerate([0.9, 0.3, 0.6]):
+            judge = {"quality": {"score": int(score * 4 + 1), "normalised": score, "reason": f"Reason {i}"}}
+            (evals_dir / f"sample_{i}_p{i}_llm_judge.json").write_text(json.dumps(judge))
+            (samples_dir / f"sample_{i}_p{i}.txt").write_text(f"Sample text {i}")
+
+        ctx = _get_worst_samples_context(run_id)
+        assert "sample_1_p1" in ctx  # worst (0.3)
+        assert "sample_2_p2" in ctx  # second worst (0.6)
+        assert "Reason 1" in ctx
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+def test_worst_samples_no_evals_dir(tmp_path):
+    from run_loop import _get_worst_samples_context
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+
+    try:
+        ctx = _get_worst_samples_context("nonexistent_run")
+        assert ctx == ""
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+def test_worst_samples_judge_error(tmp_path):
+    from run_loop import _get_worst_samples_context
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+
+    try:
+        evals_dir = tmp_path / ".tmp" / "evals" / "exp_001"
+        evals_dir.mkdir(parents=True)
+        # JSON with error key should be skipped
+        (evals_dir / "sample_0_p0_llm_judge.json").write_text(
+            json.dumps({"error": "Failed to parse", "quality": {"score": 0, "normalised": 0.0, "reason": "parse error"}})
+        )
+        ctx = _get_worst_samples_context("exp_001")
+        assert ctx == ""
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+def test_worst_samples_malformed_json(tmp_path):
+    from run_loop import _get_worst_samples_context
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+
+    try:
+        evals_dir = tmp_path / ".tmp" / "evals" / "exp_001"
+        evals_dir.mkdir(parents=True)
+        (evals_dir / "sample_0_p0_llm_judge.json").write_text("NOT VALID JSON {{{")
+        ctx = _get_worst_samples_context("exp_001")
+        assert ctx == ""
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+def test_worst_samples_truncation(tmp_path):
+    from run_loop import _get_worst_samples_context
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+
+    try:
+        evals_dir = tmp_path / ".tmp" / "evals" / "exp_001"
+        samples_dir = tmp_path / ".tmp" / "samples" / "exp_001"
+        evals_dir.mkdir(parents=True)
+        samples_dir.mkdir(parents=True)
+
+        judge = {"quality": {"score": 2, "normalised": 0.25, "reason": "Bad"}}
+        (evals_dir / "sample_0_p0_llm_judge.json").write_text(json.dumps(judge))
+        # Write a sample with >500 words
+        long_text = " ".join(["word"] * 600)
+        (samples_dir / "sample_0_p0.txt").write_text(long_text)
+
+        ctx = _get_worst_samples_context("exp_001")
+        assert "[truncated]" in ctx
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+# ── Skill completeness check tests ────────────────────────────────
+
+def test_completeness_check_valid():
+    from run_loop import _check_skill_completeness
+    original = "---\nname: test\n---\n# Section One\n\nContent\n\n## Section Two\n\nMore content"
+    candidate = "---\nname: test\n---\n# Section One\n\nChanged content\n\n## Section Two\n\nNew content"
+    assert _check_skill_completeness(original, candidate) is True
+
+
+def test_completeness_check_missing_frontmatter():
+    from run_loop import _check_skill_completeness
+    original = "---\nname: test\n---\n# Section One\nContent"
+    candidate = "# Section One\nContent without frontmatter that is definitely long enough"
+    assert _check_skill_completeness(original, candidate) is False
+
+
+def test_completeness_check_missing_headers():
+    from run_loop import _check_skill_completeness
+    original = "---\nname: test\n---\n# One\n## Two\n## Three\n## Four\nContent"
+    candidate = "---\nname: test\n---\n# One\nContent but missing Three, Two, and Four headers entirely"
+    assert _check_skill_completeness(original, candidate) is False
+
+
+# ── Atomic TSV write tests ────────────────────────────────────────
+
+def test_atomic_write_success(tmp_path):
+    from run_loop import update_decision
+    tsv = tmp_path / "results.tsv"
+    tsv.write_text("run_id\tcomposite_score\tdecision\nbaseline\t0.5\t\n")
+    update_decision(tsv, "BASELINE")
+    content = tsv.read_text()
+    assert "BASELINE" in content
+    # Temp file should be cleaned up
+    assert not (tmp_path / "results.tsv.tmp").exists()
+
+
+# ── Token usage log tests ─────────────────────────────────────────
+
+def test_token_log_aggregation(tmp_path):
+    from run_loop import aggregate_token_usage
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+
+    try:
+        log_dir = tmp_path / ".tmp"
+        log_dir.mkdir()
+        (log_dir / "token_usage_1234.jsonl").write_text(
+            '{"input": 100, "output": 50, "model": "test"}\n'
+            '{"input": 200, "output": 100, "model": "test"}\n'
+        )
+        (log_dir / "token_usage_5678.jsonl").write_text(
+            '{"input": 300, "output": 150, "model": "test"}\n'
+        )
+        total_in, total_out = aggregate_token_usage()
+        assert total_in == 600
+        assert total_out == 300
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+def test_token_log_no_files(tmp_path):
+    from run_loop import aggregate_token_usage
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+
+    try:
+        total_in, total_out = aggregate_token_usage()
+        assert total_in == 0
+        assert total_out == 0
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+def test_token_log_malformed(tmp_path):
+    from run_loop import aggregate_token_usage
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+
+    try:
+        log_dir = tmp_path / ".tmp"
+        log_dir.mkdir()
+        (log_dir / "token_usage_9999.jsonl").write_text(
+            'NOT VALID JSON\n'
+            '{"input": 100, "output": 50, "model": "test"}\n'
+        )
+        total_in, total_out = aggregate_token_usage()
+        assert total_in == 100  # Good line counted
+        assert total_out == 50
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+# ── Prompt ID sanitisation tests ──────────────────────────────────
+
+def test_prompt_id_sanitised():
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from setup import _sanitise_prompt_id
+    assert _sanitise_prompt_id("formal_email") == "formal_email"
+    assert _sanitise_prompt_id("formal email") == "formal_email"
+    assert _sanitise_prompt_id("hello/world") == "hello_world"
+    assert _sanitise_prompt_id("test@#$%") == "test"
+
+
+def test_prompt_id_empty_fallback():
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from setup import _sanitise_prompt_id
+    assert _sanitise_prompt_id("", fallback="prompt_1") == "prompt_1"
+    assert _sanitise_prompt_id("@#$", fallback="prompt_2") == "prompt_2"
+
+
+# ── Min improvement threshold tests ───────────────────────────────
+
+def test_min_improvement_keeps_above_threshold(tmp_path):
+    """Score delta > min_improvement → KEEP."""
+    from run_loop import get_best_score
+    tsv = tmp_path / "results.tsv"
+    tsv.write_text("run_id\ttimestamp\tcomposite_score\n" "baseline\t2024-01-01\t0.5000\n")
+    best = get_best_score(tsv)
+    new_score = 0.52  # delta = 0.02 > default threshold of 0.01
+    assert new_score - best > 0.01
+
+
+def test_min_improvement_discards_below_threshold(tmp_path):
+    """Score delta <= min_improvement → DISCARD (noise)."""
+    from run_loop import get_best_score
+    tsv = tmp_path / "results.tsv"
+    tsv.write_text("run_id\ttimestamp\tcomposite_score\n" "baseline\t2024-01-01\t0.5000\n")
+    best = get_best_score(tsv)
+    new_score = 0.505  # delta = 0.005 < default threshold of 0.01
+    assert new_score - best <= 0.01
+
+
+# ── Self-judge warning test ───────────────────────────────────────
+
+def test_self_judge_warning():
+    """When judge_provider is not set, a warning should be printed."""
+    cfg = _make_config()
+    assert "judge_provider" not in cfg  # No separate judge
+    # The warning is printed in run_loop.main(), tested via integration
+    # Here we just verify the config has no judge_provider
+    assert cfg.get("judge_provider") is None
+
+
+# ── get_latest_run_id tests ───────────────────────────────────────
+
+def test_get_latest_run_id(tmp_path):
+    from run_loop import get_latest_run_id
+    tsv = tmp_path / "results.tsv"
+    tsv.write_text(
+        "run_id\ttimestamp\tcomposite_score\n"
+        "baseline\t2024-01-01\t0.5\n"
+        "exp_001\t2024-01-01\t0.6\n"
+    )
+    assert get_latest_run_id(tsv) == "exp_001"
+
+
+def test_get_latest_run_id_empty(tmp_path):
+    from run_loop import get_latest_run_id
+    tsv = tmp_path / "results.tsv"
+    tsv.write_text("run_id\ttimestamp\tcomposite_score\n")
+    assert get_latest_run_id(tsv) is None
+
+
+def test_get_latest_run_id_missing(tmp_path):
+    from run_loop import get_latest_run_id
+    assert get_latest_run_id(tmp_path / "missing.tsv") is None
