@@ -12,18 +12,38 @@ echo "  AutoEvaluation"
 echo "================================================"
 echo ""
 
+# ── 0. Python version check ──────────────────────────────────────
+PYTHON=""
+for candidate in python3 python; do
+  if command -v "$candidate" &>/dev/null; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+
+if [ -z "$PYTHON" ]; then
+  echo "  Error: No Python found. Install Python 3.10+ first."
+  exit 1
+fi
+
+PY_VERSION=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+PY_MAJOR=$("$PYTHON" -c "import sys; print(sys.version_info.major)")
+PY_MINOR=$("$PYTHON" -c "import sys; print(sys.version_info.minor)")
+
+if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]); then
+  echo "  Error: Python 3.10+ required (found $PY_VERSION)."
+  echo "  Install a newer version: https://www.python.org/downloads/"
+  exit 1
+fi
+echo "  ✓ Python $PY_VERSION"
+
 # ── 1. Virtual environment ───────────────────────────────────────
 if [ ! -d ".venv" ]; then
   echo "Creating virtual environment..."
   if command -v uv &>/dev/null; then
     uv venv --quiet
-  elif command -v python3 &>/dev/null; then
-    python3 -m venv .venv
-  elif command -v python &>/dev/null; then
-    python -m venv .venv
   else
-    echo "  Error: No Python found. Install Python 3.10+ first."
-    exit 1
+    "$PYTHON" -m venv .venv
   fi
   echo "  ✓ Virtual environment created"
 fi
@@ -32,11 +52,28 @@ fi
 source .venv/bin/activate
 
 # ── 3. Install dependencies ──────────────────────────────────────
+# Always install pyyaml. Provider SDK is installed based on config (or all if no config yet).
+PROVIDER_PKG=""
+if [ -f "config.yaml" ]; then
+  PROVIDER=$(python3 -c "import yaml; print(yaml.safe_load(open('config.yaml')).get('provider',''))" 2>/dev/null || echo "")
+  case "$PROVIDER" in
+    gemini)    PROVIDER_PKG="google-genai" ;;
+    openai)    PROVIDER_PKG="openai" ;;
+    anthropic) PROVIDER_PKG="anthropic" ;;
+  esac
+fi
+
 echo "Installing dependencies..."
-if command -v uv &>/dev/null; then
-  uv pip install -q pyyaml google-genai openai anthropic
+if [ -n "$PROVIDER_PKG" ]; then
+  PKGS="pyyaml $PROVIDER_PKG"
 else
-  pip install -q pyyaml google-genai openai anthropic
+  PKGS="pyyaml google-genai openai anthropic"
+fi
+
+if command -v uv &>/dev/null; then
+  uv pip install -q $PKGS
+else
+  pip install -q $PKGS
 fi
 echo "  ✓ Dependencies installed"
 echo ""
@@ -51,23 +88,16 @@ if [ ! -f "config.yaml" ]; then
 fi
 
 # ── 5. Check API key ─────────────────────────────────────────────
-# Read the key env var name from config.yaml, check env + .env, prompt if missing.
-# Then validate the key with a tiny API call.
 python3 - <<'PYEOF'
 import sys, os, getpass, yaml
 from pathlib import Path
+sys.path.insert(0, "tools")
+from utils import load_env
 
 cfg = yaml.safe_load(Path("config.yaml").read_text())
 key_env = cfg.get("api_key_env", "GEMINI_API_KEY")
 
-# Load .env into environ
-env_path = Path(".env")
-if env_path.exists():
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+load_env(Path(".env"))
 
 if not os.environ.get(key_env):
     print(f"  {key_env} not found. Enter your API key:")
@@ -84,7 +114,6 @@ else:
 
 # Validate the API key with a tiny call
 print("  Validating API key...", end="", flush=True)
-sys.path.insert(0, "tools")
 try:
     from model_client import ModelClient
     client = ModelClient(

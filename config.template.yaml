@@ -33,6 +33,7 @@ max_iterations: 0     # stop after N experiments (0 = unlimited)
 max_hours: 0          # stop after N hours (0 = unlimited, accepts decimals e.g. 1.5)
 max_cost_usd: 0       # stop after estimated spend exceeds this (0 = unlimited)
 convergence_window: 0 # stop after N iterations with no improvement (0 = disabled)
+min_improvement: 0.01 # only KEEP changes with score delta above this threshold (filters noise)
 
 # --- Performance ---
 max_concurrent: 1     # parallel LLM calls for generation and evaluation (1 = serial)
