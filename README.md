@@ -8,6 +8,13 @@ I pointed it at a writing style guide and let it run overnight. It made 20 attem
 
 Point it at any LLM instruction set. Go to bed. Wake up with a measurably better prompt.
 
+## Documentation
+
+- **[Getting Started](docs/GETTING_STARTED.md)** — Step-by-step tutorial from clone to first optimisation
+- **[Configuration Reference](docs/CONFIG_REFERENCE.md)** — Complete guide to every config.yaml option
+- **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** — Common issues, entry point decisions, and fixes
+- **[Architecture & Design](docs/ARCHITECTURE.md)** — Why the system works this way, design trade-offs, and signal flow
+
 ## How it works
 
 ```mermaid
