@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 # Allow imports from tools/
 TOOLS_DIR = Path(__file__).parent.parent / "tools"
@@ -1186,3 +1187,123 @@ def test_results_io_migrates_legacy_header(tmp_path):
     assert rows[1]["composite_stddev"] == "0.0200"
     header = results_io.read_header(tsv)
     assert "holdout_composite" in header
+
+
+# ── generate_config.write_all (shared config writer) ──────────────────
+
+def test_write_all_shared_writer(tmp_path, monkeypatch):
+    """The shared writer in tools/generate_config.py is used by both the
+    /autoeval CLI and setup.py's wizard. Verify config.yaml keys, .env
+    key-preservation, and .gitignore append-only behaviour all in one place
+    so a schema change only needs testing once."""
+    import generate_config
+    monkeypatch.setattr(generate_config, "PROJECT_ROOT", tmp_path)
+
+    # Pre-existing .env with an unrelated key that must survive, plus a stale
+    # value for the key we're about to write, which must be replaced.
+    (tmp_path / ".env").write_text("OTHER_KEY=keep-me\nGEMINI_API_KEY=stale\n", encoding="utf-8")
+
+    # Pre-existing .gitignore with a custom entry that must survive, and one
+    # required entry already present that must not be duplicated.
+    (tmp_path / ".gitignore").write_text("node_modules/\n.env\n", encoding="utf-8")
+
+    metrics = [
+        {"name": "quality", "weight": 0.5, "rubric": "1-5 quality"},
+        {"name": "accuracy", "weight": 0.5, "rubric": "1-5 accuracy"},
+    ]
+    prompts = [{"id": "task_1", "genre": "general", "prompt": "Do a thing."}]
+
+    generate_config.write_all(
+        skill_name="my-skill",
+        skill_description="A test skill",
+        skill_content="Be helpful.",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        api_key_env="GEMINI_API_KEY",
+        api_key="new-key-value",
+        metrics=metrics,
+        prompts=prompts,
+        iterations=10,
+    )
+
+    # config.yaml keys
+    config = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert config["provider"] == "gemini"
+    assert config["model"] == "gemini-2.5-flash"
+    assert config["api_key_env"] == "GEMINI_API_KEY"
+    assert config["skill_path"] == "SKILL.md"
+    assert config["prompts_path"] == "prompts/prompts.json"
+    assert config["results_tsv"] == "results.tsv"
+    assert config["max_iterations"] == 10
+    assert config["judge_sees_skill"] is True
+    assert config["replicates_per_prompt"] == 3
+    assert config["accept_rule"] == "paired"
+    assert config["accept_confidence"] == 0.95
+    assert config["min_valid_sample_frac"] == 0.8
+    assert config["holdout_fraction"] == 0.3
+    assert len(config["llm_judge_dimensions"]) == 2
+    assert config["deterministic_metrics"] == []
+
+    # .env: existing unrelated key preserved, target key updated (not duplicated)
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "OTHER_KEY=keep-me" in env_text
+    assert "GEMINI_API_KEY=new-key-value" in env_text
+    assert "stale" not in env_text
+    assert env_text.count("GEMINI_API_KEY=") == 1
+
+    # .gitignore: append-only — existing custom entry preserved, no duplicate
+    # of an already-present required entry, missing required entries added
+    gitignore_text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "node_modules/" in gitignore_text
+    assert gitignore_text.count(".env") == 1
+    for required_entry in ["results.tsv", "SKILL.md.best", "config.yaml",
+                            "best_aggregate.json", "best_holdout_aggregate.json",
+                            "__pycache__/", "*.pyc", ".tmp/"]:
+        assert required_entry in gitignore_text
+
+    # SKILL.md and prompts.json written
+    assert "Be helpful." in (tmp_path / "SKILL.md").read_text(encoding="utf-8")
+    written_prompts = json.loads((tmp_path / "prompts" / "prompts.json").read_text(encoding="utf-8"))
+    assert written_prompts == prompts
+
+    # settings.json permission superset present
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    allow = settings["permissions"]["allow"]
+    assert "Bash(python3 tools/decision.py *)" in allow
+    assert "Bash(python3 tools/results_io.py *)" in allow
+    assert "Bash(cp .tmp/evals/* best_aggregate.json)" in allow
+
+
+def test_write_all_skips_skill_and_prompts_when_none(tmp_path, monkeypatch):
+    """setup.py's --defaults / --skill-file modes pass skill_content=None and
+    prompts=None to keep pre-existing files untouched — verify write_all
+    honours that instead of always writing them."""
+    import generate_config
+    monkeypatch.setattr(generate_config, "PROJECT_ROOT", tmp_path)
+
+    (tmp_path / "SKILL.md").write_text("pre-existing content", encoding="utf-8")
+
+    generate_config.write_all(
+        skill_name="my-skill",
+        skill_description="",
+        skill_content=None,
+        provider="gemini",
+        model="gemini-2.5-flash",
+        api_key_env="GEMINI_API_KEY",
+        api_key="key",
+        metrics=[{"name": "quality", "weight": 1.0, "rubric": "r"}],
+        prompts=None,
+        iterations=5,
+        advanced={"judge_sees_skill": False, "replicates_per_prompt": 2,
+                  "convergence_window": 4, "max_cost_usd": 10.0, "max_concurrent": 2},
+    )
+
+    assert (tmp_path / "SKILL.md").read_text(encoding="utf-8") == "pre-existing content"
+    assert not (tmp_path / "prompts" / "prompts.json").exists()
+
+    config = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert config["judge_sees_skill"] is False
+    assert config["replicates_per_prompt"] == 2
+    assert config["convergence_window"] == 4
+    assert config["max_cost_usd"] == 10.0
+    assert config["max_concurrent"] == 2

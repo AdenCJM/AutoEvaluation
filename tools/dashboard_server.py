@@ -946,6 +946,8 @@ function createCompositeChart(data) {
     const slope = denom ? (n * sumXY - sumX * sumY) / denom : 0;
     const intercept = denom ? (sumY - slope * sumX) / n : scores[0] || 0;
     const trendLine = scores.map((_, i) => slope * i + intercept);
+    const bandUpper = data.runs.map(r => (r.composite_score + (r.composite_stddev || 0)) * 100);
+    const bandLower = data.runs.map(r => (r.composite_score - (r.composite_stddev || 0)) * 100);
 
     compositeChart = new Chart(ctx, {
         type: "line",
@@ -974,6 +976,25 @@ function createCompositeChart(data) {
                     borderWidth: 2,
                     pointRadius: 0,
                     fill: false,
+                },
+                {
+                    // ± stddev band (upper edge, invisible line)
+                    label: "Band upper",
+                    data: bandUpper,
+                    borderWidth: 0,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    fill: false,
+                },
+                {
+                    // ± stddev band (lower edge, fills up to the upper edge)
+                    label: "Band lower",
+                    data: bandLower,
+                    borderWidth: 0,
+                    pointRadius: 0,
+                    tension: 0.2,
+                    backgroundColor: "rgba(212,160,21,0.12)",
+                    fill: "-1",
                 }
             ]
         },
@@ -988,6 +1009,7 @@ function createCompositeChart(data) {
                     borderWidth: 1,
                     titleColor: getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim(),
                     bodyColor: getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim(),
+                    filter: item => item.datasetIndex < 2,
                     callbacks: {
                         label: ctx => {
                             if (ctx.datasetIndex !== 0) return 'Trend: ' + ctx.parsed.y.toFixed(1) + '%';
@@ -1038,6 +1060,8 @@ function updateCompositeChart(data) {
     compositeChart.data.datasets[0].data = scores;
     compositeChart.data.datasets[0].pointBackgroundColor = getPointColors(data.runs);
     compositeChart.data.datasets[1].data = trendLine;
+    compositeChart.data.datasets[2].data = data.runs.map(r => (r.composite_score + (r.composite_stddev || 0)) * 100);
+    compositeChart.data.datasets[3].data = data.runs.map(r => (r.composite_score - (r.composite_stddev || 0)) * 100);
     compositeChart.update("none");
 }
 

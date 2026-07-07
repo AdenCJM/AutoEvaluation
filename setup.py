@@ -26,6 +26,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 from utils import DEFAULT_MODELS, load_env, default_dimensions
+from generate_config import write_all as _write_all
 
 # Cheap judge model per provider — offered as the default separate judge
 _JUDGE_SUGGESTIONS = {
@@ -546,104 +547,44 @@ def write_files(
     prompts, dimensions, max_iterations, max_hours,
     advanced=None, judge=None,
 ):
-    """Write all generated files."""
-    # .env
-    env_path = PROJECT_ROOT / ".env"
-    env_path.write_text(f"# AutoEvaluation API key\n{api_key_env}={api_key}\n", encoding="utf-8")
-    print(f"  ✓ .env")
+    """Write all generated files.
 
-    # config.yaml
-    config = {
-        "provider": provider,
-        "model": model,
-        "api_key_env": api_key_env,
-        "skill_path": skill_path_config,
-        "prompts_path": "prompts/prompts.json",
-        "results_tsv": "results.tsv",
-        "max_iterations": max_iterations,
-        "max_hours": max_hours,
-        "judge_sees_skill": True,
-        "replicates_per_prompt": 3,
-        "accept_rule": "paired",
-        "accept_confidence": 0.95,
-        "min_valid_sample_frac": 0.8,
-        "holdout_fraction": 0.3,
-        "llm_judge_dimensions": [
-            {"name": d["name"], "weight": d["weight"], "direction": "higher_is_better", "rubric": d["rubric"]}
-            for d in dimensions
-        ],
-        "deterministic_metrics": [],
-    }
-    if judge:
-        config.update(judge)
-    if advanced:
-        config["judge_sees_skill"] = advanced.get("judge_sees_skill", True)
-        config["replicates_per_prompt"] = advanced.get("replicates_per_prompt", 3)
-        config["convergence_window"] = advanced.get("convergence_window", 0)
-        config["max_cost_usd"] = advanced.get("max_cost_usd", 0)
-        config["max_concurrent"] = advanced.get("max_concurrent", 1)
-    cfg_path = PROJECT_ROOT / "config.yaml"
-    cfg_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False), encoding="utf-8")
-    print(f"  ✓ config.yaml")
+    Thin wrapper around the shared tools/generate_config.write_all — keeps
+    this function's signature stable for setup.py's callers while delegating
+    the actual file-writing logic to a single implementation shared with the
+    /autoeval skill's CLI.
+    """
+    judge = judge or {}
 
-    # SKILL.md (only write if skill_content is provided — skip if using external file)
+    # setup.py's callers pass fully-formed SKILL.md text (frontmatter already
+    # applied by step_skill()), whereas write_all's skill_content branch
+    # applies its own frontmatter wrapping for the /autoeval CLI's raw
+    # instruction text. Write pre-formatted content verbatim here and let
+    # write_all skip its own SKILL.md step, so both callers still share every
+    # other file writer (.env, config.yaml, prompts.json, settings.json,
+    # .gitignore).
     if skill_content is not None:
         skill_path = PROJECT_ROOT / skill_path_config
         skill_path.write_text(skill_content, encoding="utf-8")
         print(f"  ✓ {skill_path_config}")
 
-    # prompts/prompts.json (only write if prompts are provided)
-    if prompts is not None:
-        prompts_dir = PROJECT_ROOT / "prompts"
-        prompts_dir.mkdir(exist_ok=True)
-        prompts_path = prompts_dir / "prompts.json"
-        prompts_path.write_text(json.dumps(prompts, indent=2), encoding="utf-8")
-        print(f"  ✓ prompts/prompts.json")
-
-    # .claude/settings.json (auto-approve for Claude Code autopilot)
-    claude_dir = PROJECT_ROOT / ".claude"
-    claude_dir.mkdir(exist_ok=True)
-    settings = {
-        "permissions": {
-            "allow": [
-                "Bash(python3 tools/experiment_runner.py *)",
-                "Bash(python3 tools/generate_samples.py *)",
-                "Bash(python3 tools/eval_deterministic.py *)",
-                "Bash(python3 tools/eval_llm_judge.py *)",
-                "Bash(python3 tools/score_aggregator.py *)",
-                "Bash(python3 tools/dashboard_server.py *)",
-                "Bash(python3 tools/decision.py *)",
-                "Bash(python3 tools/results_io.py *)",
-                "Bash(cp SKILL.md SKILL.md.best)",
-                "Bash(cp SKILL.md.best SKILL.md)",
-                "Bash(cp .tmp/evals/* best_aggregate.json)",
-                "Bash(cp .tmp/evals/* best_holdout_aggregate.json)",
-                "Bash(sed -i '' 's/*$/\\tKEEP/' results.tsv)",
-                "Bash(sed -i '' 's/*$/\\tDISCARD/' results.tsv)",
-                "Bash(cat *)",
-                "Bash(head *)",
-                "Bash(tail *)",
-                "Bash(wc *)",
-            ]
-        }
-    }
-    settings_path = claude_dir / "settings.json"
-    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    print(f"  ✓ .claude/settings.json (auto-approve for Claude Code)")
-
-    # .gitignore — append missing entries only; never clobber an existing
-    # (possibly hand-maintained) file
-    gitignore_path = PROJECT_ROOT / ".gitignore"
-    required = [".env", ".tmp/", "__pycache__/", "*.pyc", "results.tsv",
-                "SKILL.md.best", "config.yaml", "best_aggregate.json",
-                "best_holdout_aggregate.json"]
-    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
-    existing_lines = {line.strip() for line in existing.splitlines()}
-    missing = [e for e in required if e not in existing_lines and f"/{e}" not in existing_lines]
-    if missing:
-        content = existing.rstrip("\n") + ("\n" if existing else "") + "\n".join(missing) + "\n"
-        gitignore_path.write_text(content, encoding="utf-8")
-    print(f"  ✓ .gitignore")
+    _write_all(
+        skill_name="",
+        skill_description="",
+        skill_content=None,
+        provider=provider,
+        model=model,
+        api_key_env=api_key_env,
+        api_key=api_key,
+        metrics=dimensions,
+        prompts=prompts,
+        iterations=max_iterations,
+        max_hours=max_hours,
+        judge_provider=judge.get("judge_provider", ""),
+        judge_model=judge.get("judge_model", ""),
+        skill_path_config=skill_path_config,
+        advanced=advanced,
+    )
 
 
 # ---------------------------------------------------------------------------
