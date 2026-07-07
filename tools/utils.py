@@ -5,6 +5,7 @@ Common functions used across the AutoEvaluation toolchain.
 Centralises config loading, path resolution, and validation.
 """
 
+import math
 import os
 import re
 import sys
@@ -12,6 +13,19 @@ import yaml
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+
+# Default model per provider — the single source of truth for every setup
+# surface (setup.py, generate_config.py, run_loop.py quick-start).
+# Verified against provider pricing pages 2026-07-07. When these move a
+# generation, update here and in ModelClient._PRICING together.
+DEFAULT_MODELS = {
+    "gemini": ("gemini-3.5-flash", "GEMINI_API_KEY"),
+    "openai": ("gpt-5.4", "OPENAI_API_KEY"),
+    # claude-sonnet-5 balances cost and quality for a harness making hundreds
+    # of calls. claude-opus-4-8 for maximum quality; claude-haiku-4-5 as a
+    # cheap judge model.
+    "anthropic": ("claude-sonnet-5", "ANTHROPIC_API_KEY"),
+}
 
 
 def load_env(env_path: Path = None) -> None:
@@ -41,12 +55,16 @@ def default_dimensions() -> list[dict]:
     """Default LLM judge dimensions used by setup.py and run_loop.py."""
     return [
         {
-            "name": "human_score",
+            "name": "natural_voice",
             "weight": 0.30,
             "direction": "higher_is_better",
             "rubric": (
-                "Does this read like a competent human wrote it? "
-                "1 = obviously AI-generated, 5 = indistinguishable from human."
+                "Judge only observable features of the prose: sentence and "
+                "paragraph length vary naturally; no stock filler phrases "
+                "('it's important to note', 'in today's world', 'delve'); "
+                "concrete word choice over abstract hedging; transitions read "
+                "as thought, not as template. "
+                "1 = formulaic and templated, 5 = varied, specific, natural."
             ),
         },
         {
@@ -84,6 +102,35 @@ def sanitise_description(desc: str) -> str:
     return re.sub(r'[\t\n\r\x00-\x1f]', ' ', desc).strip()
 
 
+def split_prompts(prompts: list[dict], holdout_fraction: float) -> tuple[list[dict], list[dict]]:
+    """Split prompts into (train, holdout) sets deterministically.
+
+    Prompts carrying an explicit "split" key ("train" or "holdout") are
+    honoured as-is. Of the remainder, the last ceil(n * holdout_fraction)
+    prompts (in file order) become holdout, so the assignment is stable
+    across runs and re-reads.
+    """
+    explicit_train = [p for p in prompts if p.get("split") == "train"]
+    explicit_holdout = [p for p in prompts if p.get("split") == "holdout"]
+    unassigned = [p for p in prompts if p.get("split") not in ("train", "holdout")]
+
+    if holdout_fraction > 0 and len(unassigned) > 1:
+        # round() tracks the fraction on small sets (ceil overshoots badly:
+        # 3 prompts at 0.34 would hold out 2); always hold out at least 1
+        n_holdout = max(1, round(len(unassigned) * holdout_fraction))
+    else:
+        n_holdout = 0
+    # Never let the holdout swallow the training set
+    n_holdout = min(n_holdout, max(0, len(unassigned) - 1))
+
+    if n_holdout:
+        auto_train, auto_holdout = unassigned[:-n_holdout], unassigned[-n_holdout:]
+    else:
+        auto_train, auto_holdout = unassigned, []
+
+    return explicit_train + auto_train, explicit_holdout + auto_holdout
+
+
 def validate_config(cfg: dict) -> dict:
     """Validate config and return it (possibly with auto-normalised weights).
 
@@ -117,5 +164,29 @@ def validate_config(cfg: dict) -> dict:
         print(f"Warning: Metric weights sum to {total_weight:.4f}, not 1.0. Auto-normalising.", file=sys.stderr)
         for m in all_metrics:
             m["weight"] = m["weight"] / total_weight
+
+    # Evaluation-statistics settings (defaults applied here so downstream
+    # tools can read them without re-defaulting)
+    cfg.setdefault("replicates_per_prompt", 3)
+    cfg.setdefault("accept_rule", "paired")
+    cfg.setdefault("accept_confidence", 0.95)
+    cfg.setdefault("min_valid_sample_frac", 0.8)
+    cfg.setdefault("holdout_fraction", 0.3)
+
+    if not isinstance(cfg["replicates_per_prompt"], int) or cfg["replicates_per_prompt"] < 1:
+        print("Error: replicates_per_prompt must be an integer >= 1", file=sys.stderr)
+        sys.exit(1)
+    if cfg["accept_rule"] not in ("paired", "simple"):
+        print(f"Error: accept_rule must be 'paired' or 'simple', got {cfg['accept_rule']!r}", file=sys.stderr)
+        sys.exit(1)
+    if not (0.5 <= float(cfg["accept_confidence"]) < 1.0):
+        print("Error: accept_confidence must be in [0.5, 1.0)", file=sys.stderr)
+        sys.exit(1)
+    if not (0.0 <= float(cfg["min_valid_sample_frac"]) <= 1.0):
+        print("Error: min_valid_sample_frac must be in [0, 1]", file=sys.stderr)
+        sys.exit(1)
+    if not (0.0 <= float(cfg["holdout_fraction"]) <= 0.5):
+        print("Error: holdout_fraction must be in [0, 0.5]", file=sys.stderr)
+        sys.exit(1)
 
     return cfg

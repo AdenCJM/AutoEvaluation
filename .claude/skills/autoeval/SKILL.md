@@ -130,11 +130,23 @@ Check `.env` in the project root for existing API keys (GEMINI_API_KEY, OPENAI_A
   Header: "LLM provider"
   Options:
   - A) Gemini (Google) — cheapest, recommended (Recommended)
-  - B) OpenAI (GPT-4o)
-  - C) Anthropic (Claude)
+  - B) OpenAI (GPT-5.4)
+  - C) Anthropic (Claude Sonnet 5)
 
 After they specify the provider, if the key isn't in `.env`, ask:
 > "Paste your [Provider] API key and I'll save it to .env:"
+
+### Step 1.4b: Judge model
+
+A separate judge model avoids self-judging bias (the generator rewarding its own style). Use AskUserQuestion:
+
+Question: "Should a separate, cheaper model judge the outputs? This gives cleaner scores and costs less."
+Header: "Judge model"
+Options:
+- A) Yes — use [cheap model for their provider] (Recommended)
+- B) No — same model judges its own output
+
+Cheap judge suggestions per provider: gemini → `gemini-3.1-flash-lite`, openai → `gpt-5.4-mini`, anthropic → `claude-haiku-4-5`.
 
 ### Step 1.5: Run duration
 
@@ -159,15 +171,16 @@ python3 tools/generate_config.py \
   --skill-content "<content>" \
   --provider <provider> \
   --api-key "<key>" \
+  --judge-model "<judge model, if chosen in Step 1.4b>" \
   --metrics '<json_array>' \
   --iterations <N> \
   --generate-prompts
 ```
 
 **Option B:** If generate_config.py doesn't exist or fails, write the files yourself:
-- `config.yaml` — provider, model, api_key_env, metrics, iterations
+- `config.yaml` — provider, model, api_key_env, judge settings, metrics, iterations, and the evaluation-statistics keys (`replicates_per_prompt: 3`, `accept_rule: paired`, `holdout_fraction: 0.3`, `judge_sees_skill: true`) — copy the shape from `config.template.yaml`
 - `SKILL.md` — the skill with YAML frontmatter
-- `prompts/prompts.json` — test prompts (generate 5-8 diverse ones based on the skill)
+- `prompts/prompts.json` — test prompts (generate 8-10 diverse ones based on the skill; with `holdout_fraction: 0.3` the last ~3 become the holdout validation set)
 - `.env` — API key
 - `.claude/settings.json` — auto-approve rules
 
@@ -215,10 +228,11 @@ Tell the user:
 
 > **Starting the optimisation now. Here's what will happen:**
 >
-> 1. I'll run a baseline evaluation to establish the starting score
+> 1. I'll run a baseline evaluation to establish the starting score (several completions per prompt, so scores carry a variance estimate)
 > 2. Then I'll iterate: analyse weaknesses → modify the skill → re-evaluate → keep or revert
-> 3. You can watch progress on the dashboard or just check back later
-> 4. If you want to steer me (e.g. "focus on tone"), just send a message
+> 3. A change is only kept when the improvement clears the score noise AND doesn't regress on held-out test prompts
+> 4. You can watch progress on the dashboard or just check back later
+> 5. If you want to steer me (e.g. "focus on tone"), just send a message
 >
 > I'll run for **N iterations** unless you stop me.
 > Starting now...

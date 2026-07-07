@@ -46,41 +46,16 @@ import yaml
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+from utils import DEFAULT_MODELS, default_dimensions
 
 
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 
-_DEFAULT_METRICS = [
-    {
-        "name": "human_score",
-        "weight": 0.30,
-        "direction": "higher_is_better",
-        "rubric": (
-            "Does this read like a competent human wrote it? "
-            "1 = obviously AI-generated, 5 = indistinguishable from human."
-        ),
-    },
-    {
-        "name": "task_accuracy",
-        "weight": 0.40,
-        "direction": "higher_is_better",
-        "rubric": (
-            "Does the output correctly follow the skill instructions? "
-            "1 = ignores them, 5 = perfect adherence."
-        ),
-    },
-    {
-        "name": "quality",
-        "weight": 0.30,
-        "direction": "higher_is_better",
-        "rubric": (
-            "Is this high-quality output overall? "
-            "1 = poor, 5 = excellent."
-        ),
-    },
-]
+# Shared with setup.py and run_loop.py via utils.default_dimensions()
+_DEFAULT_METRICS = default_dimensions()
 
 _DEFAULT_PROMPTS = [
     {
@@ -110,11 +85,7 @@ _DEFAULT_PROMPTS = [
     },
 ]
 
-_PROVIDER_MAP = {
-    "gemini": ("gemini-2.5-flash", "GEMINI_API_KEY"),
-    "openai": ("gpt-4o", "OPENAI_API_KEY"),
-    "anthropic": ("claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
-}
+_PROVIDER_MAP = DEFAULT_MODELS
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +218,8 @@ def write_all(
     prompts: list[dict],
     iterations: int,
     max_hours: float = 0,
+    judge_provider: str = "",
+    judge_model: str = "",
 ):
     """Write all config files atomically."""
 
@@ -276,6 +249,12 @@ def write_all(
         "results_tsv": "results.tsv",
         "max_iterations": iterations,
         "max_hours": max_hours,
+        "judge_sees_skill": True,
+        "replicates_per_prompt": 3,
+        "accept_rule": "paired",
+        "accept_confidence": 0.95,
+        "min_valid_sample_frac": 0.8,
+        "holdout_fraction": 0.3,
         "llm_judge_dimensions": [
             {
                 "name": m["name"],
@@ -287,6 +266,10 @@ def write_all(
         ],
         "deterministic_metrics": [],
     }
+    if judge_model:
+        config["judge_provider"] = judge_provider or provider
+        config["judge_model"] = judge_model
+        config["judge_api_key_env"] = DEFAULT_MODELS.get(judge_provider or provider, (None, api_key_env))[1]
     cfg_path = PROJECT_ROOT / "config.yaml"
     cfg_path.write_text(
         yaml.dump(config, default_flow_style=False, sort_keys=False),
@@ -328,9 +311,13 @@ def write_all(
                 "Bash(python3 tools/dashboard_server.py *)",
                 "Bash(python3 tools/generate_config.py *)",
                 "Bash(python3 tools/run_loop.py *)",
+                "Bash(python3 tools/decision.py *)",
+                "Bash(python3 tools/results_io.py *)",
                 "Bash(open http://localhost:*)",
                 "Bash(cp SKILL.md SKILL.md.best)",
                 "Bash(cp SKILL.md.best SKILL.md)",
+                "Bash(cp .tmp/evals/* best_aggregate.json)",
+                "Bash(cp .tmp/evals/* best_holdout_aggregate.json)",
                 "Bash(cat *)",
                 "Bash(head *)",
                 "Bash(tail *)",
@@ -344,7 +331,7 @@ def write_all(
 
     # 6. .gitignore
     gitignore_path = PROJECT_ROOT / ".gitignore"
-    gitignore_content = ".env\n.tmp/\n__pycache__/\n*.pyc\n.claude/\nresults.tsv\nSKILL.md.best\nconfig.yaml\n"
+    gitignore_content = ".env\n.tmp/\n__pycache__/\n*.pyc\n.claude/\nresults.tsv\nSKILL.md.best\nconfig.yaml\nbest_aggregate.json\nbest_holdout_aggregate.json\n"
     gitignore_path.write_text(gitignore_content, encoding="utf-8")
     print("  ✓ .gitignore")
 
@@ -364,6 +351,10 @@ def main():
     parser.add_argument("--provider", required=True, choices=["gemini", "openai", "anthropic"])
     parser.add_argument("--model", default="", help="Model name (defaults to provider's default)")
     parser.add_argument("--api-key", required=True, help="API key value")
+    parser.add_argument("--judge-provider", default="", choices=["", "gemini", "openai", "anthropic"],
+                        help="Separate judge provider (defaults to --provider when --judge-model is set)")
+    parser.add_argument("--judge-model", default="",
+                        help="Separate judge model, e.g. a cheaper model, to avoid self-judging bias")
     parser.add_argument("--metrics", default="", help="JSON array of metric dicts (default: 3 standard)")
     parser.add_argument("--prompts", default="", help="JSON array of prompt dicts (default: 5 generic)")
     parser.add_argument("--generate-prompts", action="store_true", help="Use AI to generate test prompts")
@@ -433,6 +424,8 @@ def main():
         prompts=prompts,
         iterations=args.iterations,
         max_hours=args.max_hours,
+        judge_provider=args.judge_provider,
+        judge_model=args.judge_model,
     )
 
     # Print summary

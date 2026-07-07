@@ -231,49 +231,89 @@ def _make_dimensions():
     ]
 
 
-def test_judge_parse_valid_json():
+def _fallback_client(response_text: str):
+    """Real ModelClient whose structured path falls back to prompt-and-parse,
+    with the raw generation mocked — exercises the full parse pipeline."""
+    from model_client import ModelClient
+    with patch.dict("os.environ", {"TEST_KEY": "test"}):
+        with patch.object(ModelClient, "_get_client", return_value=None):
+            client = ModelClient("gemini", "test-model", "TEST_KEY")
+    client._structured_unsupported = True  # force prompt-and-parse fallback
+    client._generate_once = MagicMock(return_value=response_text)
+    return client
+
+
+def test_judge_structured_valid():
     from eval_llm_judge import judge_sample
     mock_client = MagicMock()
-    mock_client.generate.return_value = json.dumps({
+    mock_client.generate_structured.return_value = {
         "quality": {"score": 4, "reason": "good"},
         "accuracy": {"score": 5, "reason": "perfect"},
-    })
+    }
     result = judge_sample("test text", _make_dimensions(), mock_client)
+    assert result["quality"]["normalised"] == 0.75
+    assert result["accuracy"]["normalised"] == 1.0
+
+
+def test_judge_parse_valid_json_fallback():
+    from eval_llm_judge import judge_sample
+    client = _fallback_client(json.dumps({
+        "quality": {"score": 4, "reason": "good"},
+        "accuracy": {"score": 5, "reason": "perfect"},
+    }))
+    result = judge_sample("test text", _make_dimensions(), client)
     assert result["quality"]["normalised"] == 0.75
     assert result["accuracy"]["normalised"] == 1.0
 
 
 def test_judge_parse_markdown_wrapped():
     from eval_llm_judge import judge_sample
-    mock_client = MagicMock()
-    mock_client.generate.return_value = '```json\n{"quality": {"score": 3, "reason": "ok"}, "accuracy": {"score": 4, "reason": "good"}}\n```'
-    result = judge_sample("test text", _make_dimensions(), mock_client)
+    client = _fallback_client('```json\n{"quality": {"score": 3, "reason": "ok"}, "accuracy": {"score": 4, "reason": "good"}}\n```')
+    result = judge_sample("test text", _make_dimensions(), client)
     assert result["quality"]["normalised"] == 0.5
 
 
 def test_judge_parse_malformed():
     from eval_llm_judge import judge_sample
-    mock_client = MagicMock()
-    mock_client.generate.return_value = "This is not JSON at all, just garbage text with no structure."
-    result = judge_sample("test text", _make_dimensions(), mock_client)
+    client = _fallback_client("This is not JSON at all, just garbage text with no structure.")
+    result = judge_sample("test text", _make_dimensions(), client)
     assert "error" in result
     assert result["quality"]["normalised"] == 0.0
 
 
 def test_judge_parse_refusal():
     from eval_llm_judge import judge_sample
-    mock_client = MagicMock()
-    mock_client.generate.return_value = "I cannot evaluate this content as it violates my guidelines."
-    result = judge_sample("test text", _make_dimensions(), mock_client)
+    client = _fallback_client("I cannot evaluate this content as it violates my guidelines.")
+    result = judge_sample("test text", _make_dimensions(), client)
+    assert "error" in result
     assert result["quality"]["normalised"] == 0.0
 
 
 def test_judge_parse_empty():
     from eval_llm_judge import judge_sample
-    mock_client = MagicMock()
-    mock_client.generate.return_value = ""
-    result = judge_sample("test text", _make_dimensions(), mock_client)
+    client = _fallback_client("")
+    result = judge_sample("test text", _make_dimensions(), client)
+    assert "error" in result
     assert result["quality"]["normalised"] == 0.0
+
+
+def test_judge_error_result_marks_error():
+    """A judge call that raises must produce an 'error' result, never scores."""
+    from eval_llm_judge import judge_sample
+    mock_client = MagicMock()
+    mock_client.generate_structured.side_effect = ValueError("boom")
+    result = judge_sample("test text", _make_dimensions(), mock_client)
+    assert "error" in result
+    # Retried exactly once before giving up
+    assert mock_client.generate_structured.call_count == 2
+
+
+def test_judge_schema_from_dimensions():
+    from eval_llm_judge import build_judge_schema
+    schema = build_judge_schema(_make_dimensions())
+    assert set(schema["properties"]) == {"quality", "accuracy"}
+    assert schema["properties"]["quality"]["properties"]["score"]["enum"] == [1, 2, 3, 4, 5]
+    assert schema["additionalProperties"] is False
 
 
 def test_judge_selective_context():
@@ -301,7 +341,7 @@ def test_judge_client_separate_provider(tmp_path):
     from model_client import ModelClient
     cfg = {
         "provider": "gemini", "model": "gemini-2.5-flash", "api_key_env": "GEMINI_API_KEY",
-        "judge_provider": "openai", "judge_model": "gpt-4o", "judge_api_key_env": "OPENAI_API_KEY",
+        "judge_provider": "openai", "judge_model": "gpt-5.4-mini", "judge_api_key_env": "OPENAI_API_KEY",
     }
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.dump(cfg))
@@ -310,7 +350,7 @@ def test_judge_client_separate_provider(tmp_path):
         with patch.object(ModelClient, "_get_client", return_value=None):
             client = ModelClient.from_config(str(cfg_path), judge=True)
             assert client.provider == "openai"
-            assert client.model == "gpt-4o"
+            assert client.model == "gpt-5.4-mini"
 
 
 def test_judge_client_fallback(tmp_path):
@@ -539,16 +579,16 @@ def test_parallel_generation_partial_failure():
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = Path(tmp)
         # Success
-        r1 = _generate_one(client, "skill", {"id": "p1", "genre": "test", "prompt": "hi"}, 0, out_dir)
+        r1 = _generate_one(client, "skill", {"id": "p1", "genre": "test", "prompt": "hi"}, 0, out_dir, "sample_0_p1")
         assert r1["file"] is not None
 
         # Failure
-        r2 = _generate_one(client, "skill", {"id": "p2", "genre": "test", "prompt": "hi"}, 1, out_dir)
+        r2 = _generate_one(client, "skill", {"id": "p2", "genre": "test", "prompt": "hi"}, 1, out_dir, "sample_1_p2")
         assert r2["file"] is None
         assert "error" in r2
 
         # Success again
-        r3 = _generate_one(client, "skill", {"id": "p3", "genre": "test", "prompt": "hi"}, 2, out_dir)
+        r3 = _generate_one(client, "skill", {"id": "p3", "genre": "test", "prompt": "hi"}, 2, out_dir, "sample_2_p3")
         assert r3["file"] is not None
 
 
@@ -639,7 +679,7 @@ def test_default_dimensions_from_utils():
     dims = default_dimensions()
     assert len(dims) == 3
     names = {d["name"] for d in dims}
-    assert names == {"human_score", "task_accuracy", "quality"}
+    assert names == {"natural_voice", "task_accuracy", "quality"}
     total_weight = sum(d["weight"] for d in dims)
     assert abs(total_weight - 1.0) < 0.01
 
@@ -914,3 +954,235 @@ def test_get_latest_run_id_empty(tmp_path):
 def test_get_latest_run_id_missing(tmp_path):
     from run_loop import get_latest_run_id
     assert get_latest_run_id(tmp_path / "missing.tsv") is None
+
+
+# ── Pricing & model registry (July 2026 refresh) ────────────────────
+
+def test_default_models_all_have_pricing():
+    """Every default model must resolve to a pricing entry, so cost caps work
+    out of the box. Guards against the model/pricing drift that silently
+    disabled max_cost_usd for four months."""
+    from model_client import ModelClient
+    from utils import DEFAULT_MODELS
+    for provider, (model, _env) in DEFAULT_MODELS.items():
+        assert ModelClient.price_for_model(model) is not None, (
+            f"default model {model!r} for {provider} has no pricing entry"
+        )
+
+
+def test_pricing_longest_prefix_wins():
+    from model_client import ModelClient
+    # A versioned haiku ID must resolve via its specific prefix
+    assert ModelClient.price_for_model("claude-haiku-4-5-20251001") == \
+        ModelClient._PRICING["claude-haiku-4-5"]
+    # gpt-5.4-mini must not be priced as gpt-5.4
+    assert ModelClient.price_for_model("gpt-5.4-mini") == \
+        ModelClient._PRICING["gpt-5.4-mini"]
+
+
+def test_unknown_model_pricing_is_none_and_flagged():
+    from model_client import ModelClient
+    assert ModelClient.price_for_model("some-future-model") is None
+    with patch.dict("os.environ", {"TEST_KEY": "test"}):
+        with patch.object(ModelClient, "_get_client", return_value=None):
+            client = ModelClient("gemini", "some-future-model", "TEST_KEY")
+    assert client.pricing_known is False
+    assert client.usage_summary()["pricing_known"] is False
+
+
+# ── Aggregator: judge failures are excluded, not zeroed ─────────────
+
+def _write_judge_eval(tmp_path, sample_id, quality, accuracy):
+    (tmp_path / f"{sample_id}_llm_judge.json").write_text(json.dumps({
+        "quality": {"score": 0, "normalised": quality, "reason": "x"},
+        "accuracy": {"score": 0, "normalised": accuracy, "reason": "x"},
+    }))
+
+
+def _agg_cfg(**overrides):
+    cfg = {
+        "llm_judge_dimensions": [
+            {"name": "quality", "weight": 0.5, "rubric": "q"},
+            {"name": "accuracy", "weight": 0.5, "rubric": "a"},
+        ],
+        "deterministic_metrics": [],
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def test_aggregator_excludes_errored_samples(tmp_path):
+    from score_aggregator import aggregate
+    _write_judge_eval(tmp_path, "sample_0_p1", 0.8, 0.8)
+    _write_judge_eval(tmp_path, "sample_1_p2", 0.8, 0.8)
+    _write_judge_eval(tmp_path, "sample_2_p3", 0.8, 0.8)
+    _write_judge_eval(tmp_path, "sample_3_p4", 0.8, 0.8)
+    # One errored sample — must NOT drag the composite to 0.64
+    (tmp_path / "sample_4_p5_llm_judge.json").write_text(json.dumps({
+        "error": "Judge call failed",
+        "quality": {"score": 0, "normalised": 0.0, "reason": "judge error"},
+        "accuracy": {"score": 0, "normalised": 0.0, "reason": "judge error"},
+    }))
+    result = aggregate(str(tmp_path), _agg_cfg())
+    assert result["judge_errors"] == 1
+    assert result["sample_count"] == 4
+    assert result["composite_score"] == pytest.approx(0.8, abs=0.001)
+
+
+def test_aggregator_fails_below_valid_fraction(tmp_path):
+    from score_aggregator import aggregate
+    _write_judge_eval(tmp_path, "sample_0_p1", 0.8, 0.8)
+    for i in range(1, 4):
+        (tmp_path / f"sample_{i}_p{i+1}_llm_judge.json").write_text(json.dumps({
+            "error": "Judge call failed",
+        }))
+    with pytest.raises(SystemExit):
+        aggregate(str(tmp_path), _agg_cfg(min_valid_sample_frac=0.8))
+
+
+def test_aggregator_variance_and_per_prompt(tmp_path):
+    from score_aggregator import aggregate
+    # Two prompts, two replicates each
+    _write_judge_eval(tmp_path, "sample_0_p1_r0", 0.8, 0.8)
+    _write_judge_eval(tmp_path, "sample_0_p1_r1", 0.6, 0.6)
+    _write_judge_eval(tmp_path, "sample_1_p2_r0", 1.0, 1.0)
+    _write_judge_eval(tmp_path, "sample_1_p2_r1", 0.8, 0.8)
+    result = aggregate(str(tmp_path), _agg_cfg())
+    assert result["composite_stddev"] > 0
+    assert result["per_prompt"]["p1"]["composite"] == pytest.approx(0.7, abs=0.001)
+    assert result["per_prompt"]["p2"]["composite"] == pytest.approx(0.9, abs=0.001)
+    assert result["per_prompt"]["p1"]["n"] == 2
+
+
+def test_prompt_id_from_sample_names():
+    from score_aggregator import prompt_id_from_sample
+    assert prompt_id_from_sample("sample_0_intro_email") == "intro_email"
+    assert prompt_id_from_sample("sample_12_intro_email_r3") == "intro_email"
+    assert prompt_id_from_sample("sample_5_p1_r0") == "p1"
+
+
+# ── Decision rule ────────────────────────────────────────────────────
+
+def _per_prompt(scores: dict) -> dict:
+    return {pid: {"composite": s, "n": 3} for pid, s in scores.items()}
+
+
+def test_decision_same_scores_rejected():
+    """Identical per-prompt scores must never be kept — there is no signal."""
+    from decision import paired_verdict
+    scores = {f"p{i}": 0.8 for i in range(8)}
+    verdict = paired_verdict(_per_prompt(scores), _per_prompt(scores))
+    assert verdict["keep"] is False
+
+
+def test_decision_noise_rejected():
+    """Small alternating noise around zero must be rejected."""
+    from decision import paired_verdict
+    base = {f"p{i}": 0.8 for i in range(8)}
+    cand = {f"p{i}": 0.8 + (0.02 if i % 2 == 0 else -0.02) for i in range(8)}
+    verdict = paired_verdict(_per_prompt(cand), _per_prompt(base))
+    assert verdict["keep"] is False
+
+
+def test_decision_consistent_shift_accepted():
+    """A consistent improvement on every prompt must be kept."""
+    from decision import paired_verdict
+    base = {f"p{i}": 0.70 + i * 0.01 for i in range(8)}
+    cand = {pid: s + 0.05 for pid, s in base.items()}
+    verdict = paired_verdict(_per_prompt(cand), _per_prompt(base))
+    assert verdict["keep"] is True
+    assert verdict["mean_delta"] == pytest.approx(0.05, abs=0.001)
+
+
+def test_decision_non_regression_mode():
+    """Holdout mode: equal scores pass, a consistent drop fails."""
+    from decision import paired_verdict
+    base = {f"p{i}": 0.8 for i in range(6)}
+    same = paired_verdict(_per_prompt(base), _per_prompt(base), mode="non-regression")
+    assert same["keep"] is True
+    worse = {pid: s - 0.08 for pid, s in base.items()}
+    regressed = paired_verdict(_per_prompt(worse), _per_prompt(base), mode="non-regression")
+    assert regressed["keep"] is False
+
+
+def test_decision_simple_fallback_without_per_prompt():
+    """Resuming a legacy run (no per-prompt data) falls back to the simple rule."""
+    from decision import decide
+    cand = {"composite_score": 0.85}
+    best = {"composite_score": 0.80}
+    verdict = decide(cand, best, {"accept_rule": "paired", "min_improvement": 0.01})
+    assert verdict["method"] == "simple"
+    assert verdict["keep"] is True
+
+
+# ── Prompt splitting ─────────────────────────────────────────────────
+
+def test_split_prompts_deterministic():
+    from utils import split_prompts
+    prompts = [{"id": f"p{i}", "prompt": "x"} for i in range(10)]
+    train, holdout = split_prompts(prompts, 0.3)
+    assert len(train) == 7 and len(holdout) == 3
+    # Stable across calls
+    train2, holdout2 = split_prompts(prompts, 0.3)
+    assert [p["id"] for p in holdout] == [p["id"] for p in holdout2]
+
+
+def test_split_prompts_explicit_wins():
+    from utils import split_prompts
+    prompts = [
+        {"id": "a", "prompt": "x", "split": "holdout"},
+        {"id": "b", "prompt": "x", "split": "train"},
+        {"id": "c", "prompt": "x"},
+    ]
+    train, holdout = split_prompts(prompts, 0.0)
+    assert {p["id"] for p in holdout} == {"a"}
+    assert {p["id"] for p in train} == {"b", "c"}
+
+
+def test_split_prompts_never_empties_train():
+    from utils import split_prompts
+    prompts = [{"id": "only", "prompt": "x"}]
+    train, holdout = split_prompts(prompts, 0.5)
+    assert len(train) == 1 and len(holdout) == 0
+
+
+# ── results_io ───────────────────────────────────────────────────────
+
+def test_results_io_roundtrip(tmp_path):
+    import results_io
+    tsv = tmp_path / "results.tsv"
+    metrics = ["quality", "accuracy"]
+    results_io.append_row(tsv, {
+        "run_id": "baseline", "timestamp": "t", "composite_score": "0.8000",
+        "quality": "0.8", "accuracy": "0.8", "change_description": "init",
+        "decision": "", "composite_stddev": "0.0100", "n_samples": 6,
+        "judge_errors": 0,
+    }, metrics)
+    results_io.update_last_row(tsv, {"decision": "BASELINE", "holdout_composite": "0.7900"})
+    rows = results_io.read_rows(tsv)
+    assert rows[0]["decision"] == "BASELINE"
+    assert rows[0]["holdout_composite"] == "0.7900"
+    assert results_io.best_composite(tsv) == pytest.approx(0.8)
+    assert results_io.latest_run_id(tsv) == "baseline"
+
+
+def test_results_io_migrates_legacy_header(tmp_path):
+    """A pre-July-2026 results.tsv (no extra columns) gets its header extended
+    in place, and old rows still read correctly."""
+    import results_io
+    tsv = tmp_path / "results.tsv"
+    tsv.write_text(
+        "run_id\ttimestamp\tcomposite_score\tquality\tchange_description\tdecision\n"
+        "baseline\t2026-03-01\t0.8000\t0.8\tinit\tBASELINE\n"
+    )
+    results_io.append_row(tsv, {
+        "run_id": "exp_001", "timestamp": "t", "composite_score": "0.8100",
+        "quality": "0.81", "change_description": "tweak", "decision": "",
+        "composite_stddev": "0.0200", "n_samples": 6, "judge_errors": 0,
+    }, ["quality"])
+    rows = results_io.read_rows(tsv)
+    assert rows[0]["run_id"] == "baseline"
+    assert rows[0]["decision"] == "BASELINE"
+    assert rows[1]["composite_stddev"] == "0.0200"
+    header = results_io.read_header(tsv)
+    assert "holdout_composite" in header

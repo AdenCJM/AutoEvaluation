@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import results_io
 from utils import PROJECT_ROOT, load_config, sanitise_description, validate_config
 
 TOOLS_DIR = PROJECT_ROOT / "tools"
@@ -76,8 +77,16 @@ def run_experiment(
     cfg: dict,
     description: str = "",
     decision: str = "",
+    prompt_set: str = "train",
+    write_tsv: bool = True,
 ) -> dict:
-    """Execute one full evaluation cycle."""
+    """Execute one full evaluation cycle.
+
+    prompt_set selects which prompt split to evaluate ("train" for loop
+    iterations, "holdout" for validation, "all" for legacy behaviour).
+    write_tsv=False runs an auxiliary evaluation (holdout check, noise
+    measurement) without appending a row to results.tsv.
+    """
     skill_path = cfg.get("skill_path", "SKILL.md")
     prompts_path = cfg.get("prompts_path", "prompts/prompts.json")
     results_tsv = cfg.get("results_tsv", "results.tsv")
@@ -93,7 +102,7 @@ def run_experiment(
 
     # Step 1: Generate samples
     print(f"\n{'='*60}")
-    print(f"EXPERIMENT: {run_id}")
+    print(f"EXPERIMENT: {run_id} (prompt set: {prompt_set})")
     print(f"{'='*60}")
     print(f"\n[1/{'4' if has_deterministic else '3'}] Generating samples...")
 
@@ -103,6 +112,8 @@ def run_experiment(
         "--prompts-path", prompts_path,
         "--output-dir", str(samples_dir),
         "--max-concurrent", str(max_concurrent),
+        "--replicates", str(cfg.get("replicates_per_prompt", 1)),
+        "--prompt-set", prompt_set,
     ])
     if result.returncode != 0:
         print(f"ERROR generating samples:\n{result.stderr}")
@@ -181,33 +192,32 @@ def run_experiment(
 
     elapsed = time.time() - start_time
 
-    # Append to results.tsv
-    tsv_path = PROJECT_ROOT / results_tsv
-    header_cols = ["run_id", "timestamp", "composite_score"] + metric_names + ["change_description", "decision"]
-    header = "\t".join(header_cols)
+    if agg.get("judge_errors"):
+        print(f"Note: {agg['judge_errors']} judge failures excluded "
+              f"({agg['sample_count']}/{agg.get('samples_total', agg['sample_count'])} samples used)")
 
-    if not tsv_path.exists():
-        tsv_path.write_text(header + "\n", encoding="utf-8")
+    # Append to results.tsv (skipped for auxiliary runs like holdout checks)
+    if write_tsv:
+        tsv_path = PROJECT_ROOT / results_tsv
+        metrics = agg["metric_averages"]
+        row = {
+            "run_id": run_id,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            "composite_score": f"{agg['composite_score']:.4f}",
+            "change_description": sanitise_description(description),
+            "decision": decision,
+            "composite_stddev": f"{agg.get('composite_stddev', 0.0):.4f}",
+            "n_samples": agg.get("sample_count", 0),
+            "judge_errors": agg.get("judge_errors", 0),
+            "holdout_composite": "",
+        }
+        for name in metric_names:
+            row[name] = f"{metrics.get(name, 0.0):.4f}"
+        results_io.append_row(tsv_path, row, metric_names)
+        print(f"\nResults appended to {tsv_path}")
 
-    metrics = agg["metric_averages"]
-    row_parts = [
-        run_id,
-        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-        f"{agg['composite_score']:.4f}",
-    ]
-    for name in metric_names:
-        row_parts.append(f"{metrics.get(name, 0.0):.4f}")
-    row_parts.append(sanitise_description(description))
-    row_parts.append(decision)
-
-    row = "\t".join(row_parts)
-
-    with open(tsv_path, "a", encoding="utf-8") as f:
-        f.write(row + "\n")
-
-    print(f"\nResults appended to {tsv_path}")
     print(f"Total time: {elapsed:.1f}s")
-    print(f"\nCOMPOSITE SCORE: {agg['composite_score']:.4f}")
+    print(f"\nCOMPOSITE SCORE: {agg['composite_score']:.4f} ± {agg.get('composite_stddev', 0.0):.4f}")
 
     return agg
 
@@ -219,6 +229,10 @@ def main():
     parser.add_argument("--run-id", required=True, help="Unique identifier for this run")
     parser.add_argument("--description", default="", help="One-line description of what changed")
     parser.add_argument("--decision", default="", help="KEEP, DISCARD, or BASELINE")
+    parser.add_argument("--prompt-set", choices=["all", "train", "holdout"], default="train",
+                        help="Prompt split to evaluate (default: train)")
+    parser.add_argument("--no-tsv", action="store_true",
+                        help="Auxiliary run: don't append a row to results.tsv")
     args = parser.parse_args()
 
     run_experiment(
@@ -226,6 +240,8 @@ def main():
         cfg=cfg,
         description=sanitise_description(args.description),
         decision=args.decision,
+        prompt_set=args.prompt_set,
+        write_tsv=not args.no_tsv,
     )
 
 

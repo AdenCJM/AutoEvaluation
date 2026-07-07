@@ -25,7 +25,14 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
-from utils import load_env, default_dimensions
+from utils import DEFAULT_MODELS, load_env, default_dimensions
+
+# Cheap judge model per provider — offered as the default separate judge
+_JUDGE_SUGGESTIONS = {
+    "gemini": "gemini-3.1-flash-lite",
+    "openai": "gpt-5.4-mini",
+    "anthropic": "claude-haiku-4-5",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +182,9 @@ def step_provider() -> tuple[str, str, str, str]:
     choice = ask("Enter 1, 2, or 3", "1")
 
     provider_map = {
-        "1": ("gemini", "gemini-2.5-flash", "GEMINI_API_KEY"),
-        "2": ("openai", "gpt-4o", "OPENAI_API_KEY"),
-        "3": ("anthropic", "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
+        "1": ("gemini",) + DEFAULT_MODELS["gemini"],
+        "2": ("openai",) + DEFAULT_MODELS["openai"],
+        "3": ("anthropic",) + DEFAULT_MODELS["anthropic"],
     }
 
     provider, default_model, default_env = provider_map.get(choice, provider_map["1"])
@@ -323,21 +330,49 @@ def step_duration() -> tuple[int, float]:
     return max_iterations, max_hours
 
 
-def step_advanced() -> dict:
-    """Step 6: Advanced options (all optional)."""
+def step_judge(provider: str) -> dict:
+    """Step 6: Judge model. A separate (cheaper) judge model avoids
+    self-judging bias — the generator grading its own output style."""
     print("\n" + "=" * 50)
-    print("STEP 6: Advanced Options (press Enter to skip each)")
+    print("STEP 6: Judge Model")
+    print("=" * 50)
+    print("By default the same model generates outputs AND judges them, which")
+    print("lets the model reward its own style. A separate judge model gives")
+    print("cleaner signal, and a cheaper one keeps costs down.")
+    print()
+
+    suggestion = _JUDGE_SUGGESTIONS.get(provider, "")
+    use_separate = ask_choice(f"Use a separate judge model? (suggested: {suggestion})", ["y", "n"], "y")
+    if use_separate.lower() != "y":
+        return {}
+
+    judge_model = ask("Judge model name", suggestion)
+    # Same provider by default so the existing API key covers the judge;
+    # a different provider (cross-family judging) is configurable in config.yaml
+    return {
+        "judge_provider": provider,
+        "judge_model": judge_model,
+        "judge_api_key_env": DEFAULT_MODELS[provider][1],
+    }
+
+
+def step_advanced() -> dict:
+    """Step 7: Advanced options (all optional)."""
+    print("\n" + "=" * 50)
+    print("STEP 7: Advanced Options (press Enter to skip each)")
     print("=" * 50)
     print("These are optional - defaults work well for most users.")
     print()
 
-    judge_sees_skill = ask_choice("Semi-blind judge (judge sees SKILL.md for task_accuracy)?", ["y", "n"], "n")
+    judge_sees_skill = ask_choice("Semi-blind judge (judge sees SKILL.md for task_accuracy)?", ["y", "n"], "y")
+    replicates = ask_int("Replicates per prompt - completions generated per test prompt (higher = less noise, more cost)", 3)
     convergence_window = ask_int("Convergence window - stop after N iterations with no improvement (0 = disabled)", 0)
     max_cost_usd = ask_float("Max cost in USD - stop when estimated spend exceeds this (0 = unlimited)", 0)
-    max_concurrent = ask_int("Parallel workers for generation and evaluation (1 = serial)", 1)
+    max_concurrent = ask_int("Parallel workers for generation and evaluation (1 = serial)", 4)
 
     return {
         "judge_sees_skill": judge_sees_skill.lower() == "y",
+        "replicates_per_prompt": max(1, replicates),
         "convergence_window": convergence_window,
         "max_cost_usd": max_cost_usd,
         "max_concurrent": max(1, max_concurrent),
@@ -509,7 +544,7 @@ def write_files(
     provider, model, api_key_env, api_key,
     skill_content, skill_path_config,
     prompts, dimensions, max_iterations, max_hours,
-    advanced=None,
+    advanced=None, judge=None,
 ):
     """Write all generated files."""
     # .env
@@ -527,14 +562,23 @@ def write_files(
         "results_tsv": "results.tsv",
         "max_iterations": max_iterations,
         "max_hours": max_hours,
+        "judge_sees_skill": True,
+        "replicates_per_prompt": 3,
+        "accept_rule": "paired",
+        "accept_confidence": 0.95,
+        "min_valid_sample_frac": 0.8,
+        "holdout_fraction": 0.3,
         "llm_judge_dimensions": [
             {"name": d["name"], "weight": d["weight"], "direction": "higher_is_better", "rubric": d["rubric"]}
             for d in dimensions
         ],
         "deterministic_metrics": [],
     }
+    if judge:
+        config.update(judge)
     if advanced:
-        config["judge_sees_skill"] = advanced.get("judge_sees_skill", False)
+        config["judge_sees_skill"] = advanced.get("judge_sees_skill", True)
+        config["replicates_per_prompt"] = advanced.get("replicates_per_prompt", 3)
         config["convergence_window"] = advanced.get("convergence_window", 0)
         config["max_cost_usd"] = advanced.get("max_cost_usd", 0)
         config["max_concurrent"] = advanced.get("max_concurrent", 1)
@@ -568,8 +612,12 @@ def write_files(
                 "Bash(python3 tools/eval_llm_judge.py *)",
                 "Bash(python3 tools/score_aggregator.py *)",
                 "Bash(python3 tools/dashboard_server.py *)",
+                "Bash(python3 tools/decision.py *)",
+                "Bash(python3 tools/results_io.py *)",
                 "Bash(cp SKILL.md SKILL.md.best)",
                 "Bash(cp SKILL.md.best SKILL.md)",
+                "Bash(cp .tmp/evals/* best_aggregate.json)",
+                "Bash(cp .tmp/evals/* best_holdout_aggregate.json)",
                 "Bash(sed -i '' 's/*$/\\tKEEP/' results.tsv)",
                 "Bash(sed -i '' 's/*$/\\tDISCARD/' results.tsv)",
                 "Bash(cat *)",
@@ -585,7 +633,7 @@ def write_files(
 
     # .gitignore
     gitignore_path = PROJECT_ROOT / ".gitignore"
-    gitignore_content = ".env\n.tmp/\n__pycache__/\n*.pyc\n.claude/\nresults.tsv\nSKILL.md.best\nconfig.yaml\n"
+    gitignore_content = ".env\n.tmp/\n__pycache__/\n*.pyc\n.claude/\nresults.tsv\nSKILL.md.best\nconfig.yaml\nbest_aggregate.json\nbest_holdout_aggregate.json\n"
     gitignore_path.write_text(gitignore_content, encoding="utf-8")
     print(f"  ✓ .gitignore")
 
@@ -667,12 +715,8 @@ Examples:
     # =====================================================================
     if args.defaults:
         provider_choice = args.provider or "gemini"
-        provider_map = {
-            "gemini": ("gemini", "gemini-2.5-flash", "GEMINI_API_KEY"),
-            "openai": ("openai", "gpt-4o", "OPENAI_API_KEY"),
-            "anthropic": ("anthropic", "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
-        }
-        provider, model, api_key_env = provider_map[provider_choice]
+        model, api_key_env = DEFAULT_MODELS[provider_choice]
+        provider = provider_choice
 
         # Load API key from .env or environment
         load_env(PROJECT_ROOT / ".env")
@@ -821,7 +865,10 @@ Examples:
     # --- Step 5: Duration ---
     max_iterations, max_hours = step_duration()
 
-    # --- Step 6: Advanced ---
+    # --- Step 6: Judge model ---
+    judge = step_judge(provider)
+
+    # --- Step 7: Advanced ---
     advanced = step_advanced()
 
     # --- Write files ---
@@ -833,7 +880,7 @@ Examples:
         provider, model, api_key_env, api_key,
         skill_content, skill_path_config,
         prompts, dimensions, max_iterations, max_hours,
-        advanced=advanced,
+        advanced=advanced, judge=judge,
     )
 
     print("\n" + "=" * 50)
@@ -848,7 +895,7 @@ Examples:
     print()
     print("  Or run directly:")
     print()
-    print("     claude -p program.md      # with Claude Code")
+    print("     /autoeval in Claude Code   # conversational")
     print("     python3 tools/run_loop.py  # headless")
     print()
     print("  Watch scores in real time:")

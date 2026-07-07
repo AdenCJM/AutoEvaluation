@@ -24,48 +24,34 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import results_io
+from decision import decide
 from model_client import ModelClient
-from utils import PROJECT_ROOT, default_dimensions, load_config, sanitise_description, validate_config
+from utils import DEFAULT_MODELS, PROJECT_ROOT, default_dimensions, load_config, sanitise_description, validate_config
+
+BEST_AGG_PATH = PROJECT_ROOT / "best_aggregate.json"
+BEST_HOLDOUT_AGG_PATH = PROJECT_ROOT / "best_holdout_aggregate.json"
 
 
 def get_next_run_id(results_tsv: Path) -> str:
     """Determine the next experiment ID from results.tsv."""
-    if not results_tsv.exists():
+    rows = results_io.read_rows(results_tsv)
+    if not rows:
         return "baseline"
 
-    lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
-    if len(lines) <= 1:
-        return "baseline"
-
-    last_id = lines[-1].split("\t")[0]
+    last_id = rows[-1].get("run_id") or ""
     if last_id == "baseline":
         return "exp_001"
 
     match = re.search(r"exp_(\d+)", last_id)
     if match:
         return f"exp_{int(match.group(1)) + 1:03d}"
-    return f"exp_{len(lines):03d}"
+    return f"exp_{len(rows):03d}"
 
 
 def get_best_score(results_tsv: Path) -> float:
     """Read the best composite score from results.tsv."""
-    if not results_tsv.exists():
-        return 0.0
-
-    lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
-    if len(lines) <= 1:
-        return 0.0
-
-    best = 0.0
-    for line in lines[1:]:
-        parts = line.split("\t")
-        if len(parts) >= 3:
-            try:
-                score = float(parts[2])
-                best = max(best, score)
-            except ValueError:
-                pass
-    return best
+    return results_io.best_composite(results_tsv)
 
 
 def get_recent_results(results_tsv: Path, n: int = 3) -> str:
@@ -81,12 +67,7 @@ def get_recent_results(results_tsv: Path, n: int = 3) -> str:
 
 def get_latest_run_id(results_tsv: Path) -> str | None:
     """Return the run_id of the most recent completed experiment."""
-    if not results_tsv.exists():
-        return None
-    lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
-    if len(lines) <= 1:
-        return None
-    return lines[-1].split("\t")[0] or None
+    return results_io.latest_run_id(results_tsv)
 
 
 def _get_worst_samples_context(latest_run_id: str, n: int = 2) -> str:
@@ -164,13 +145,16 @@ def _get_worst_samples_context(latest_run_id: str, n: int = 2) -> str:
     return "\n\n".join(parts)
 
 
-def run_experiment(run_id: str, description: str = "") -> dict:
+def run_experiment(run_id: str, description: str = "", extra_args: list = None) -> dict:
     """Run the experiment runner and return the aggregate."""
     import subprocess
+    cmd = [sys.executable, str(PROJECT_ROOT / "tools" / "experiment_runner.py"),
+           "--run-id", run_id, "--description", description]
+    if extra_args:
+        cmd += extra_args
     try:
         result = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "tools" / "experiment_runner.py"),
-             "--run-id", run_id, "--description", description],
+            cmd,
             capture_output=True, text=True, cwd=str(PROJECT_ROOT),
             timeout=1800,  # 30 min timeout for full experiment cycle
         )
@@ -186,6 +170,70 @@ def run_experiment(run_id: str, description: str = "") -> dict:
     if agg_path.exists():
         return json.loads(agg_path.read_text(encoding="utf-8"))
     return None
+
+
+def run_holdout_check(run_id: str, cfg: dict) -> dict | None:
+    """Evaluate the current SKILL.md on the holdout prompt set (no TSV row).
+    Returns the holdout aggregate, or None if the run failed or holdout is
+    disabled."""
+    if not float(cfg.get("holdout_fraction", 0)) > 0:
+        return None
+    return run_experiment(
+        f"{run_id}_holdout", "Holdout validation",
+        extra_args=["--no-tsv", "--prompt-set", "holdout"],
+    )
+
+
+def save_best_aggregates(train_agg: dict, holdout_agg: dict | None) -> None:
+    """Persist the aggregates of the current best SKILL.md so future
+    candidates can be compared with per-prompt pairing."""
+    BEST_AGG_PATH.write_text(json.dumps(train_agg, indent=2), encoding="utf-8")
+    if holdout_agg is not None:
+        BEST_HOLDOUT_AGG_PATH.write_text(json.dumps(holdout_agg, indent=2), encoding="utf-8")
+
+
+def load_best_aggregate(path: Path, results_tsv: Path) -> dict | None:
+    """Load a persisted best aggregate. Falls back to a composite-only stub
+    (from results.tsv) for runs started before per-prompt tracking existed."""
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    best = get_best_score(results_tsv)
+    return {"composite_score": best} if best else None
+
+
+def measure_noise(cfg: dict, n: int) -> None:
+    """Evaluate the current SKILL.md n times with no edits and report the
+    composite score spread — the noise floor every decision competes with."""
+    import statistics as _stats
+    print(f"Measuring evaluation noise: {n} repeated runs of the current SKILL.md...\n")
+    scores = []
+    for i in range(n):
+        agg = run_experiment(f"noise_{i+1}", "Noise measurement",
+                             extra_args=["--no-tsv", "--prompt-set", "train"])
+        if agg:
+            scores.append(agg["composite_score"])
+            print(f"  Run {i+1}/{n}: composite {agg['composite_score']:.4f}")
+        else:
+            print(f"  Run {i+1}/{n}: FAILED")
+
+    if len(scores) < 2:
+        print("\nNot enough successful runs to estimate noise.", file=sys.stderr)
+        sys.exit(1)
+
+    mean = _stats.mean(scores)
+    stddev = _stats.stdev(scores)
+    print(f"\n{'='*50}")
+    print(f"  NOISE FLOOR (n={len(scores)})")
+    print(f"{'='*50}")
+    print(f"  Composite mean:   {mean:.4f}")
+    print(f"  Composite stddev: {stddev:.4f}")
+    print(f"  Same-skill runs vary by ~±{2*stddev:.4f} (2σ).")
+    print(f"  The paired accept rule handles this automatically; if you use")
+    print(f"  accept_rule: simple, set min_improvement above {2*stddev:.4f}.")
+    print(f"{'='*50}")
 
 
 def _check_skill_completeness(original: str, candidate: str) -> bool:
@@ -303,26 +351,12 @@ Analyse the weakest metrics and the concrete failures in the sample outputs. Hyp
     return sanitise_description(description) or "Automated modification"
 
 
-def update_decision(results_tsv: Path, decision: str):
-    """Update the decision column of the last row in results.tsv (atomic write)."""
-    lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
-    if len(lines) > 1:
-        last = lines[-1]
-        if last.endswith("\t"):
-            lines[-1] = last + decision
-        else:
-            parts = last.split("\t")
-            parts[-1] = decision
-            lines[-1] = "\t".join(parts)
-        content = "\n".join(lines) + "\n"
-        # Atomic write: write to temp file, then rename
-        tmp_path = results_tsv.with_suffix(".tsv.tmp")
-        try:
-            tmp_path.write_text(content, encoding="utf-8")
-            tmp_path.rename(results_tsv)
-        except OSError as e:
-            print(f"Warning: Atomic write failed ({e}), falling back to direct write", file=sys.stderr)
-            results_tsv.write_text(content, encoding="utf-8")
+def update_decision(results_tsv: Path, decision: str, holdout_composite: float = None):
+    """Update the decision (and optionally holdout score) of the last row."""
+    updates = {"decision": decision}
+    if holdout_composite is not None:
+        updates["holdout_composite"] = f"{holdout_composite:.4f}"
+    results_io.update_last_row(results_tsv, updates)
 
 
 def _write_status(
@@ -386,25 +420,17 @@ def print_run_summary(results_tsv: Path, start_time: float, client, iterations_r
     # Parse results for baseline score and kept changes
     baseline_score = 0.0
     kept_changes = []
-    if results_tsv.exists():
-        lines = results_tsv.read_text(encoding="utf-8").strip().split("\n")
-        header = lines[0].split("\t") if lines else []
-        desc_idx = header.index("change_description") if "change_description" in header else -1
-        for line in lines[1:]:
-            parts = line.split("\t")
-            if len(parts) < 3:
-                continue
-            run_id_col = parts[0]
-            try:
-                score = float(parts[2])
-            except ValueError:
-                continue
-            decision = parts[-1].strip() if parts else ""
-            if run_id_col == "baseline":
-                baseline_score = score
-            if decision == "KEEP":
-                desc = parts[desc_idx].strip() if desc_idx >= 0 and desc_idx < len(parts) else run_id_col
-                kept_changes.append(f"  · [{run_id_col}] {desc[:80]}")
+    for row in results_io.read_rows(results_tsv):
+        run_id_col = row.get("run_id") or ""
+        try:
+            score = float(row.get("composite_score") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if run_id_col == "baseline":
+            baseline_score = score
+        if (row.get("decision") or "").strip() == "KEEP":
+            desc = (row.get("change_description") or run_id_col).strip()
+            kept_changes.append(f"  · [{run_id_col}] {desc[:80]}")
 
     improvement = best_score - baseline_score
     improvement_str = f"+{improvement:.4f}" if improvement >= 0 else f"{improvement:.4f}"
@@ -517,10 +543,11 @@ def get_total_cost(client: ModelClient) -> float:
     # Combine subprocess tokens with the modifier client's own tokens
     total_in = client.total_input_tokens + sub_in
     total_out = client.total_output_tokens + sub_out
-    for prefix, (input_price, output_price) in client._PRICING.items():
-        if client.model.startswith(prefix):
-            return total_in * input_price + total_out * output_price
-    return 0.0
+    pricing = client.price_for_model(client.model)
+    if pricing is None:
+        return 0.0
+    input_price, output_price = pricing
+    return total_in * input_price + total_out * output_price
 
 
 def _default_dimensions():
@@ -528,21 +555,14 @@ def _default_dimensions():
     return default_dimensions()
 
 
-_PROVIDER_DEFAULTS = {
-    "gemini": ("gemini-2.5-flash", "GEMINI_API_KEY"),
-    "openai": ("gpt-4o", "OPENAI_API_KEY"),
-    "anthropic": ("claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
-}
-
-
 def _quick_start_config(args) -> dict:
     """Build a config dict from CLI flags (no config.yaml needed)."""
     provider = args.provider
-    if provider not in _PROVIDER_DEFAULTS:
-        print(f"Error: Unknown provider '{provider}'. Supported: {', '.join(_PROVIDER_DEFAULTS)}", file=sys.stderr)
+    if provider not in DEFAULT_MODELS:
+        print(f"Error: Unknown provider '{provider}'. Supported: {', '.join(DEFAULT_MODELS)}", file=sys.stderr)
         sys.exit(1)
 
-    default_model, default_key_env = _PROVIDER_DEFAULTS[provider]
+    default_model, default_key_env = DEFAULT_MODELS[provider]
     model = args.model or default_model
     api_key_env = default_key_env
 
@@ -575,7 +595,12 @@ def _quick_start_config(args) -> dict:
         "max_cost_usd": 0,
         "convergence_window": 0,
         "max_concurrent": 1,
-        "judge_sees_skill": False,
+        "judge_sees_skill": True,
+        "replicates_per_prompt": 3,
+        "accept_rule": "paired",
+        "accept_confidence": 0.95,
+        "min_valid_sample_frac": 0.8,
+        "holdout_fraction": 0.3,
         "llm_judge_dimensions": _default_dimensions(),
         "deterministic_metrics": [],
     }
@@ -608,6 +633,8 @@ With existing config:
                         help="LLM provider (used with --skill)")
     parser.add_argument("--model", type=str, help="Model name override (default: provider's default)")
     parser.add_argument("--prompts", type=str, help="Path to prompts JSON file (default: prompts/prompts.json)")
+    parser.add_argument("--measure-noise", type=int, default=0, metavar="N",
+                        help="Evaluate the current SKILL.md N times with no edits and report the score noise floor, then exit")
     args = parser.parse_args()
 
     # Quick-start mode: --skill and --provider given, no config.yaml needed
@@ -623,6 +650,10 @@ With existing config:
     validate_config(cfg)
     client = ModelClient.from_config(str(PROJECT_ROOT / "config.yaml"))
 
+    if args.measure_noise:
+        measure_noise(cfg, args.measure_noise)
+        return
+
     skill_path = PROJECT_ROOT / cfg.get("skill_path", "SKILL.md")
     skill_best = PROJECT_ROOT / "SKILL.md.best"
     results_tsv = PROJECT_ROOT / cfg.get("results_tsv", "results.tsv")
@@ -631,28 +662,44 @@ With existing config:
     max_hours = args.hours or cfg.get("max_hours", 0)
     max_cost_usd = cfg.get("max_cost_usd", 0)
     convergence_window = cfg.get("convergence_window", 0)
-    min_improvement = cfg.get("min_improvement", 0.01)
+
+    # Cost-cap sanity: an unknown model prices at $0, so the cap can't fire
+    if max_cost_usd and not client.pricing_known:
+        print(
+            f"WARNING: max_cost_usd is set but there is no pricing entry for "
+            f"'{client.model}' — the cost cap CANNOT trigger. Add the model to "
+            f"ModelClient._PRICING or remove max_cost_usd.",
+            file=sys.stderr,
+        )
 
     # Self-judge warning
-    if not cfg.get("judge_provider"):
-        print("Note: Using same model for generation and judging. For better signal, set judge_provider in config.yaml.")
+    if not cfg.get("judge_provider") and not cfg.get("judge_model"):
+        print("Note: Using same model for generation and judging. For better signal, set judge_model (and ideally judge_provider) in config.yaml.")
 
     start_time = time.time()
     iteration = 0
     iter_times = []
     consecutive_discards = 0
+    consecutive_failures = 0
     iterations_since_improvement = 0
 
     # Clear stale token usage logs from prior runs
     for old_log in (PROJECT_ROOT / ".tmp").glob("token_usage_*.jsonl"):
         old_log.unlink(missing_ok=True)
 
-    # Baseline if needed
+    # Baseline if needed (train set + holdout set, so future candidates have
+    # per-prompt aggregates to pair against)
     if not results_tsv.exists() or len(results_tsv.read_text(encoding="utf-8").strip().split("\n")) <= 1:
         print("Running baseline experiment...")
-        run_experiment("baseline", "Initial baseline")
-        update_decision(results_tsv, "BASELINE")
+        base_agg = run_experiment("baseline", "Initial baseline")
+        if base_agg is None:
+            print("Baseline experiment failed — cannot start the loop.", file=sys.stderr)
+            sys.exit(1)
         shutil.copy2(skill_path, skill_best)
+        base_holdout = run_holdout_check("baseline", cfg)
+        save_best_aggregates(base_agg, base_holdout)
+        update_decision(results_tsv, "BASELINE",
+                        base_holdout["composite_score"] if base_holdout else None)
 
     while True:
         iteration += 1
@@ -707,25 +754,55 @@ With existing config:
         agg = run_experiment(run_id, description)
 
         if agg is None:
-            print("Experiment failed, retrying...")
+            consecutive_failures += 1
             shutil.copy2(skill_best, skill_path)
+            if consecutive_failures >= 3:
+                print("3 consecutive experiment failures — aborting run. "
+                      "Fix the eval pipeline (API key? judge model?) and re-run to resume.",
+                      file=sys.stderr)
+                break
+            print(f"Experiment failed ({consecutive_failures}/3), retrying...")
             continue
+        consecutive_failures = 0
 
         new_score = agg["composite_score"]
-        delta = new_score - best_score
 
-        # Decide (require min_improvement to filter noise)
-        if delta > min_improvement:
-            print(f"KEEP — score improved {best_score:.4f} → {new_score:.4f} (delta {delta:.4f} > threshold {min_improvement})")
+        # Decide: paired per-prompt comparison against the persisted best
+        # aggregate (falls back to the simple threshold rule when per-prompt
+        # data is unavailable, e.g. resuming a pre-July-2026 run)
+        best_agg = load_best_aggregate(BEST_AGG_PATH, results_tsv)
+        verdict = decide(agg, best_agg, cfg)
+        keep, reason = verdict["keep"], verdict["reason"]
+        print(f"Decision ({verdict['method']}): {reason}")
+
+        # Confirm a train-set KEEP against the holdout set — an edit that
+        # only helps the prompts it was optimised on is overfitting, not a win
+        holdout_agg = None
+        holdout_score = None
+        if keep and float(cfg.get("holdout_fraction", 0)) > 0:
+            print("Train-set improvement found — validating on holdout prompts...")
+            holdout_agg = run_holdout_check(run_id, cfg)
+            if holdout_agg is None:
+                keep, reason = False, "holdout evaluation failed"
+            else:
+                holdout_score = holdout_agg["composite_score"]
+                best_holdout = load_best_aggregate(BEST_HOLDOUT_AGG_PATH, results_tsv)
+                hv = decide(holdout_agg, best_holdout, cfg, mode="non-regression")
+                print(f"Holdout check: {hv['reason']}")
+                if not hv["keep"]:
+                    keep, reason = False, f"holdout regression — {hv['reason']}"
+
+        if keep:
+            print(f"KEEP — {best_score:.4f} → {new_score:.4f} ({reason})")
             shutil.copy2(skill_path, skill_best)
-            update_decision(results_tsv, "KEEP")
+            save_best_aggregates(agg, holdout_agg)
+            update_decision(results_tsv, "KEEP", holdout_score)
             consecutive_discards = 0
             iterations_since_improvement = 0
         else:
-            reason = f"delta {delta:.4f} below threshold {min_improvement}" if delta > 0 else f"{new_score:.4f} vs best {best_score:.4f}"
             print(f"DISCARD — {reason}")
             shutil.copy2(skill_best, skill_path)
-            update_decision(results_tsv, "DISCARD")
+            update_decision(results_tsv, "DISCARD", holdout_score)
             consecutive_discards += 1
             iterations_since_improvement += 1
 

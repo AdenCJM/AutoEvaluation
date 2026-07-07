@@ -83,7 +83,8 @@ def read_tsv(tsv_path: str, metric_config: dict) -> dict:
             header_fields = reader.fieldnames or []
 
             if not metric_names:
-                skip = {"run_id", "timestamp", "composite_score", "change_description", "decision"}
+                skip = {"run_id", "timestamp", "composite_score", "change_description", "decision",
+                        "composite_stddev", "n_samples", "judge_errors", "holdout_composite"}
                 metric_names = [c for c in header_fields if c not in skip]
 
             for row in reader:
@@ -94,9 +95,12 @@ def read_tsv(tsv_path: str, metric_config: dict) -> dict:
                         "composite_score": float(row.get("composite_score", 0)),
                         "change_description": row.get("change_description", ""),
                         "decision": row.get("decision", ""),
+                        "composite_stddev": float(row.get("composite_stddev") or 0),
+                        "holdout_composite": float(row["holdout_composite"]) if row.get("holdout_composite") else None,
+                        "judge_errors": int(row.get("judge_errors") or 0),
                     }
                     for m in metric_names:
-                        run[m] = float(row.get(m, 0))
+                        run[m] = float(row.get(m) or 0)
                     runs.append(run)
                 except (ValueError, TypeError):
                     continue
@@ -833,7 +837,9 @@ function togglePause() {
 
 async function fetchData() {
     const res = await fetch("/api/results");
-    return res.json();
+    const data = await res.json();
+    window.__latestData = data;  // used by tooltip callbacks (stddev, holdout)
+    return data;
 }
 
 function dataHash(data) {
@@ -983,7 +989,14 @@ function createCompositeChart(data) {
                     titleColor: getComputedStyle(document.documentElement).getPropertyValue('--text-primary').trim(),
                     bodyColor: getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim(),
                     callbacks: {
-                        label: ctx => ctx.datasetIndex === 0 ? ctx.parsed.y.toFixed(1) + '%' : 'Trend: ' + ctx.parsed.y.toFixed(1) + '%',
+                        label: ctx => {
+                            if (ctx.datasetIndex !== 0) return 'Trend: ' + ctx.parsed.y.toFixed(1) + '%';
+                            const run = window.__latestData && window.__latestData.runs[ctx.dataIndex];
+                            let label = ctx.parsed.y.toFixed(1) + '%';
+                            if (run && run.composite_stddev) label += ' ± ' + (run.composite_stddev * 100).toFixed(1);
+                            if (run && run.holdout_composite != null) label += ' (holdout ' + (run.holdout_composite * 100).toFixed(1) + '%)';
+                            return label;
+                        },
                         afterLabel: ctx => {
                             if (ctx.datasetIndex === 0) {
                                 const run = data.runs[ctx.dataIndex];
