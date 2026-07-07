@@ -329,10 +329,18 @@ def write_all(
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     print("  ✓ .claude/settings.json")
 
-    # 6. .gitignore
+    # 6. .gitignore — append missing entries only; never clobber an existing
+    # (possibly hand-maintained) file
     gitignore_path = PROJECT_ROOT / ".gitignore"
-    gitignore_content = ".env\n.tmp/\n__pycache__/\n*.pyc\n.claude/\nresults.tsv\nSKILL.md.best\nconfig.yaml\nbest_aggregate.json\nbest_holdout_aggregate.json\n"
-    gitignore_path.write_text(gitignore_content, encoding="utf-8")
+    required = [".env", ".tmp/", "__pycache__/", "*.pyc", "results.tsv",
+                "SKILL.md.best", "config.yaml", "best_aggregate.json",
+                "best_holdout_aggregate.json"]
+    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+    existing_lines = {line.strip() for line in existing.splitlines()}
+    missing = [e for e in required if e not in existing_lines and f"/{e}" not in existing_lines]
+    if missing:
+        content = existing.rstrip("\n") + ("\n" if existing else "") + "\n".join(missing) + "\n"
+        gitignore_path.write_text(content, encoding="utf-8")
     print("  ✓ .gitignore")
 
 
