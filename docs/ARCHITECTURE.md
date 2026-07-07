@@ -20,14 +20,17 @@ This approach is powerful because:
 └────────┬────────┘
          │
          ├─→ Generate samples using current SKILL.md
-         │   (5-10 test prompts × current skill → LLM outputs)
+         │   (5-10 test prompts × replicates_per_prompt completions each)
+         │   (samples named sample_{i}_{prompt_id}_r{k})
          │
          ├─→ Judge each sample
-         │   (LLM evaluates blind: does it follow skill? quality?)
+         │   (LLM evaluates semi-blind by default: sees skill for task_accuracy only)
          │   → Per-metric scores (1–5 scale, normalised to 0–1)
+         │   → Judge failures excluded from scoring (not counted as zeros);
+         │     aborts if failure rate exceeds min_valid_sample_frac
          │
-         ├─→ Aggregate scores
-         │   → Composite score (weighted average of metrics)
+         ├─→ Aggregate scores (train prompts + holdout prompts separately)
+         │   → Composite score (weighted average of metrics) per prompt set
          │
          ├─→ Find weaknesses
          │   (2–3 lowest-scoring metrics)
@@ -41,11 +44,16 @@ This approach is powerful because:
          │   (ONE targeted change based on the specific failure)
          │
          ├─→ Evaluate new SKILL.md
-         │   (Regenerate samples → re-judge → new composite score)
+         │   (Regenerate samples on train + holdout prompts → re-judge → new composite scores)
          │
-         ├─→ Decide: Keep or Revert?
-         │   If new score > best score (above noise threshold):
+         ├─→ Decide: Keep or Revert? (tools/decision.py)
+         │   1. Paired bootstrap CI, per-prompt, vs best_aggregate.json (accept_confidence, default 0.95)
+         │      If the CI excludes zero → candidate KEEP passes step 1
+         │   2. Holdout non-regression check vs best_holdout_aggregate.json
+         │      If holdout score doesn't regress → confirmed KEEP
+         │   If both checks pass:
          │     → cp SKILL.md SKILL.md.best
+         │     → update best_aggregate.json + best_holdout_aggregate.json
          │     → record as KEEP
          │   Else:
          │     → cp SKILL.md.best SKILL.md
@@ -93,25 +101,23 @@ Each experiment modifies **exactly one thing** in `SKILL.md`. Why?
 - **Interpretability** — the user can read the change and understand the system's reasoning
 - **Testing** — small changes are easier to validate than large refactors
 
-### Noise Filtering (min_improvement threshold)
+### Noise-Aware Decisions (accept_rule: paired, replicates, holdout)
 
-By default, changes are kept only if the score improvement exceeds 1% (configurable via `min_improvement`).
+LLM judges have variance. A score of 0.7214 vs 0.7205 might be random noise, not a real improvement. Comparing single-draw composite scores mostly measures that noise. Three mechanisms address this together:
 
-Why? Because LLM judges have variance. A score of 0.7214 vs 0.7205 might be random noise, not a real improvement. If we kept every tiny change, the skill would churn with no real progress.
+1. **Replicates** (`replicates_per_prompt`, default 3) — each prompt is sampled multiple times per experiment, so the composite score is an average, not a single draw. Replicate samples are named `sample_{i}_{prompt_id}_r{k}`.
+2. **Paired bootstrap decision** (`accept_rule: paired`, default) — `tools/decision.py` computes a per-prompt paired bootstrap confidence interval (default 95%, via `accept_confidence`) between the candidate and the current best. KEEP requires the CI to exclude zero — the improvement has to be statistically distinguishable from noise, not just numerically larger. The legacy `accept_rule: simple` (bare delta vs `min_improvement`) is preserved for compatibility.
+3. **Holdout validation** (`holdout_fraction`, default 0.3) — a slice of prompts is held out from the KEEP decision entirely. A candidate that passes the paired CI on the training prompts must also not regress on the holdout set, or it's discarded. This guards against overfitting the skill to the specific training prompts.
 
-The threshold is conservative (1% default) because:
-- Small improvements are signal, not noise (0.73 → 0.75 is real)
-- But we don't overfit to variance (0.73 → 0.7301 is ignored)
+Before tuning any of these, run `python3 tools/run_loop.py --measure-noise 3` to see how much your own judge/prompt setup varies with no change at all.
 
-### Blind Evaluation (judge_sees_skill: false by default)
+### Semi-Blind Evaluation (judge_sees_skill: true by default)
 
-The judge evaluates samples **without seeing `SKILL.md`**. This avoids self-judging bias — the LLM can't optimize to please itself.
-
-However, the `task_accuracy` metric (does the output follow the skill?) benefits from context. Optional `judge_sees_skill: true` lets the judge see the skill for that dimension only.
+The judge sees `SKILL.md` for the `task_accuracy` dimension only — other dimensions (quality, natural_voice, etc.) are still evaluated blind. This is the default because task adherence can't be judged meaningfully without seeing the task; the risk of self-judging bias for that one dimension is judged worth the improved signal.
 
 Trade-off:
-- **Blind (default)**: Cleaner signal, less bias, but task_accuracy might miss context
-- **Semi-blind**: Better task_accuracy, small bias risk, requires careful configuration
+- **Semi-blind (default)**: Better task_accuracy, small bias risk, requires careful configuration
+- **Fully blind (`judge_sees_skill: false`)**: Cleaner signal, less bias, but task_accuracy might miss context
 
 ### Deterministic Metrics (Optional)
 
@@ -151,9 +157,11 @@ During an optimisation run, only `SKILL.md` is modified. All other files are imm
 | `SKILL.md` | Read/write during loop | The target of optimisation |
 | `SKILL.md.best` | Write (tracked) | Copy of the best version seen |
 | `results.tsv` | Append-only | Full experiment history, immutable for reproducibility |
+| `best_aggregate.json` | Write (tracked, gitignored) | Best run's per-prompt scores, for the paired comparison |
+| `best_holdout_aggregate.json` | Write (tracked, gitignored) | Best run's holdout-set scores |
 | `config.yaml` | Read-only | Configuration is fixed during a run |
 | `prompts/prompts.json` | Read-only | Test prompts are fixed during a run |
-| `tools/` | Read-only | Evaluation harness is deterministic |
+| `tools/` | Read-only | Evaluation harness is deterministic (includes `decision.py`, `results_io.py`) |
 | `.tmp/samples/` | Write (intermediate) | Disposable: samples, logs, intermediate results |
 
 This design ensures **reproducibility**: given the same config and prompts, the same sequence of experiments produces the same results.
@@ -162,10 +170,10 @@ This design ensures **reproducibility**: given the same config and prompts, the 
 
 Every API call is tracked:
 - Tokens in/out per call
-- Per-provider pricing (Gemini $0.075/M input, $0.30/M output; OpenAI varies by model)
+- Per-model pricing, looked up from the `_PRICING` table in `tools/model_client.py` (longest-prefix match on model ID)
 - Cumulative cost estimate printed at run end
 
-The `max_cost_usd` limit stops the loop if estimated spend exceeds the budget.
+The `max_cost_usd` limit stops the loop if estimated spend exceeds the budget. It only enforces a budget for models with a pricing entry — unknown models print a cost-tracking warning instead of a hard stop.
 
 Why estimate, not actual? Because the system doesn't control provider billing; it only knows what it sent. A conservative estimate (tokens × provider rates) helps users stay within budget.
 
@@ -193,14 +201,16 @@ For Phase 1, the single-best approach is justified. If Phase 1 experiments show 
 
 ## Integration Points
 
-### Claude Code (`program.md`)
+### Claude Code (`program.md` + `/autoeval` skill)
 
-`program.md` encodes the loop as instructions for Claude Code. The LLM reads the file, runs the loop autonomously, modifies SKILL.md, and tracks results.
+`program.md` encodes the loop as instructions: baseline → analyse → modify → evaluate → decide → repeat. It's the loop spec, not an entry point in itself.
 
-Why a separate file? Because:
+The `/autoeval` skill (installed automatically by `start.sh` into `~/.claude/skills/`) is the actual Claude Code entry point. It runs three phases — conversational setup, a live dashboard, then autopilot — following the spec in `program.md`. The headless `tools/run_loop.py` driver implements the same spec without any Claude Code dependency.
+
+Why a separate spec file? Because:
 - The loop logic is separate from the system logic
 - Users can understand and modify loop behaviour without touching code
-- Claude Code can run the loop hands-off
+- Both the skill and the headless driver read the same spec, so they can't drift out of sync
 
 ### GitHub Actions
 
@@ -218,11 +228,11 @@ Optional live dashboard (`tools/dashboard_server.py`) plots score trends and per
 Why optional? Because:
 - Most users don't need real-time visualisation
 - The loop works fine in headless mode without it
-- Adding dependencies on web frameworks (Dash/Plotly) is a choice, not a requirement
+- `tools/dashboard_server.py` is stdlib-only (plus PyYAML for config parsing) and renders with Chart.js from a CDN, so it adds no extra Python dependencies — but it's still an extra terminal/process most headless users don't need
 
 ## Future Directions (from TODOS)
 
-**P3: Alternative search algorithms** — Explore simulated annealing, evolutionary strategies, or random restarts. The current hill-climbing is non-convex-unfriendly; population-based methods might find better optima.
+**P3: Alternative search algorithms** — Explore simulated annealing, evolutionary strategies, or random restarts. The current hill-climbing is non-convex-unfriendly; population-based methods might find better optima. The noise problem underneath this (was a bare score comparison reliable enough to trust a KEEP?) was addressed in the July 2026 modernisation via replicates, paired bootstrap decisions, and holdout validation — alternative search algorithms remain future work, now on a firmer statistical foundation.
 
 **P3: Live public dashboard** — Turn the experiment into content: a public dashboard showing AutoEvaluation running in real-time.
 

@@ -276,8 +276,8 @@ The setup wizard will ask you to:
 Open `config.yaml` and try:
 
 - **`max_concurrent: 4`** — run 4 LLM calls in parallel (faster but costs more)
-- **`judge_provider: openai`** — use a different model as the judge (better signal, but requires 2 API keys)
-- **`min_improvement: 0.05`** — only keep changes with 5%+ improvement (filters noise)
+- **`judge_provider`/`judge_model`** — use a separate, cheaper model (e.g. `claude-haiku-4-5`) as the judge (better signal, no self-judging bias)
+- **`replicates_per_prompt: 3`** — completions per prompt per experiment, so KEEP/DISCARD decisions account for score variance
 - **`convergence_window: 10`** — stop after 10 iterations with no improvement (saves API cost)
 
 See the [Configuration Guide](docs/CONFIG_REFERENCE.md) for details.
@@ -294,15 +294,15 @@ Then open http://localhost:8050 in your browser to watch scores in real-time.
 
 ### Use Claude Code for Autonomous Mode
 
-If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed:
+If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, `start.sh` automatically installs the `/autoeval` skill into `~/.claude/skills/`. Inside Claude Code, run:
 
-```bash
-claude -p program.md
+```
+/autoeval
 ```
 
-Claude will read `program.md` (the loop instructions) and run the optimisation autonomously. The loop will modify `SKILL.md`, track results, and report progress.
+This walks through three phases: conversational setup, a live dashboard, then autopilot. The skill follows the same loop spec defined in `program.md`, modifies `SKILL.md`, tracks results, and reports progress after every experiment.
 
-If that doesn't work, see [Troubleshooting: Claude Code Path Issues](docs/TROUBLESHOOTING.md#claude-code-path-issues).
+See [Troubleshooting](docs/TROUBLESHOOTING.md) if the skill isn't picked up.
 
 ---
 

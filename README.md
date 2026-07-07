@@ -14,6 +14,7 @@ Point it at any LLM instruction set. Go to bed. Wake up with a measurably better
 - **[Configuration Reference](docs/CONFIG_REFERENCE.md)** — Complete guide to every config.yaml option
 - **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** — Common issues, entry point decisions, and fixes
 - **[Architecture & Design](docs/ARCHITECTURE.md)** — Why the system works this way, design trade-offs, and signal flow
+- **[Walkthrough](walkthrough.md)** — A historical new-user test report from an early version of the tool
 
 ## How it works
 
@@ -28,7 +29,7 @@ graph LR
 1. **Analyse** — reads the weakest metrics AND the actual sample outputs that scored poorly, including the judge's reasoning for each score. The modifier sees *why* scores are low, not just numbers.
 2. **Modify** — makes ONE targeted change to the skill instructions, grounded in concrete failure examples.
 3. **Evaluate** — generates outputs using the modified skill, scores them against your rubric.
-4. **Decide** — if the score improved above the noise threshold, keep the change; otherwise revert. Small deltas that could be random noise are filtered out.
+4. **Decide** — a noise-aware, paired bootstrap comparison (per-prompt, at a configurable confidence level) decides KEEP or DISCARD, not a bare score delta. A KEEP must also hold up on a held-out set of prompts it wasn't optimised against, guarding against overfitting to the training prompts.
 5. **Repeat** — until the iteration, time, or cost limit is hit (or indefinitely).
 
 ### What makes this different
@@ -62,6 +63,14 @@ The full experiment history is in `examples/writing-style/sample-results.tsv`.
 - Python 3.10+
 - An API key for your preferred LLM provider (Gemini, OpenAI, or Anthropic)
 
+### Three ways to run it
+
+1. **`/autoeval` in Claude Code (recommended)** — conversational setup, then a live dashboard, then autopilot. `start.sh` installs the skill automatically into `~/.claude/skills/`, so once you've run it once, just type `/autoeval` in Claude Code inside the project.
+2. **`python3 setup.py` + `python3 tools/run_loop.py`** — the interactive wizard followed by the headless driver. No Claude Code dependency.
+3. **`./start.sh`** — auto-detects your environment (Claude Code available or not) and picks the right path for you.
+
+See the [Getting Started guide](docs/GETTING_STARTED.md) for a full walkthrough, or [walkthrough.md](walkthrough.md) for a real first-run report.
+
 ### One command start
 
 ```bash
@@ -71,7 +80,7 @@ echo "GEMINI_API_KEY=your-key" > .env
 ./start.sh
 ```
 
-`start.sh` handles everything: checks your Python version, creates a virtual environment, installs only the provider SDK you need (not all three), validates your API key, runs setup if needed, and starts the optimisation loop. If anything is wrong, it tells you immediately.
+`start.sh` handles everything: checks your Python version, creates a virtual environment, installs only the provider SDK you need (not all three), validates your API key, installs the `/autoeval` skill, runs setup if needed, and starts the optimisation loop. If anything is wrong, it tells you immediately.
 
 ### Try the included example
 
@@ -143,14 +152,21 @@ python3 setup.py --skill-file SKILL.md --prompts-file my-prompts.json
 
 ### With Claude Code (autonomous)
 
-If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, it can drive the optimisation loop autonomously:
+If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, the `/autoeval` skill drives the optimisation loop autonomously:
 
 ```bash
-python3 setup.py    # or use --defaults
-claude -p program.md
+python3 setup.py    # or use --defaults, or let /autoeval do this conversationally
 ```
 
-Claude reads `program.md`, which contains the loop instructions. It autonomously runs experiments, modifies your skill, and tracks results. All bash commands are auto-approved via `.claude/settings.json`.
+Then, inside Claude Code:
+
+```
+/autoeval
+```
+
+The skill runs through three phases — conversational setup, a live dashboard, then autopilot — following the loop spec in `program.md`. It autonomously runs experiments, modifies your skill, and tracks results. All bash commands are auto-approved via `.claude/settings.json`.
+
+`program.md` remains the source of truth for the loop's instructions; both the `/autoeval` skill and the headless `run_loop.py` driver implement the same spec.
 
 ### Watch scores in real time
 
@@ -172,7 +188,8 @@ The optimisation loop doesn't just look at score numbers. For each iteration, it
 2. **Reads the actual sample text** that scored poorly, so it can see the concrete failure.
 3. **Makes one targeted change** based on that specific failure, not a guess from numbers.
 4. **Validates the returned skill** hasn't been truncated or corrupted (checks frontmatter, section headers).
-5. **Filters noise**: only keeps changes where the score improvement exceeds a configurable threshold (default 1%), so random variance doesn't pollute the skill.
+5. **Decides with statistics, not vibes**: each prompt runs `replicates_per_prompt` completions (default 3), and KEEP/DISCARD is decided by a paired bootstrap confidence interval (default 95%) over the per-prompt score deltas, not a bare score comparison. Run `python3 tools/run_loop.py --measure-noise 3` to see your own noise floor.
+6. **Checks for overfitting**: a portion of your prompts (default 30%) are held out from training. A KEEP on the training prompts is only accepted if it doesn't regress on the holdout set.
 
 This means the headless mode (`run_loop.py`) is just as effective as the Claude Code mode. Both see the same signal.
 
@@ -213,17 +230,17 @@ AutoEvaluation works with any LLM provider. Set your provider in `config.yaml`:
 ```yaml
 # Gemini
 provider: gemini
-model: gemini-2.5-flash
+model: gemini-3.5-flash
 api_key_env: GEMINI_API_KEY
 
 # OpenAI
 provider: openai
-model: gpt-4o
+model: gpt-5.4
 api_key_env: OPENAI_API_KEY
 
 # Anthropic
 provider: anthropic
-model: claude-sonnet-4-20250514
+model: claude-sonnet-5
 api_key_env: ANTHROPIC_API_KEY
 ```
 
@@ -280,35 +297,37 @@ See `examples/writing-style/` for a full example with 9 deterministic metrics.
 
 ### Separate judge model
 
-By default, the same model generates outputs and evaluates them. This creates self-judging bias (the tool will warn you about this). Use a different model for evaluation:
+By default, the same model generates outputs and evaluates them. This creates self-judging bias (the tool will warn you about this). Using a separate, cheaper model for evaluation is a first-class recommendation:
 
 ```yaml
-judge_provider: openai
-judge_model: gpt-4o
-judge_api_key_env: OPENAI_API_KEY
+judge_provider: anthropic
+judge_model: claude-haiku-4-5
+judge_api_key_env: ANTHROPIC_API_KEY
 ```
 
 If these keys are absent, the primary provider is used as a fallback, with a warning.
 
 ### Semi-blind judge
 
-The judge normally evaluates outputs blind. Enable semi-blind mode to give the judge context for the `task_accuracy` dimension only:
+`judge_sees_skill` defaults to `true` (semi-blind mode is recommended): the judge sees `SKILL.md` for the `task_accuracy` dimension only.
 
 ```yaml
-judge_sees_skill: true
+judge_sees_skill: true   # default
 ```
 
-Other dimensions (quality, human_score, etc.) are still evaluated blind.
+Other dimensions (quality, natural_voice, etc.) are still evaluated blind. Set to `false` for fully blind evaluation if you want to eliminate any chance of the judge being influenced by the skill text.
 
-### Noise filtering
+### Noise-aware decisions
 
-The optimiser only keeps changes where the score improvement exceeds a minimum threshold. This prevents random judge variance from polluting the skill.
+The optimiser doesn't compare bare score deltas. Each experiment runs `replicates_per_prompt` completions per prompt (default 3), and KEEP/DISCARD is decided by a per-prompt paired bootstrap confidence interval at `accept_confidence` (default 0.95) — see `tools/decision.py`.
 
 ```yaml
-min_improvement: 0.01   # only keep changes with delta > 1% (default)
+replicates_per_prompt: 3   # completions per prompt per experiment
+accept_rule: paired        # noise-aware decision (default); "simple" preserves the legacy min_improvement threshold
+accept_confidence: 0.95    # confidence level for the paired bootstrap CI
 ```
 
-Set to `0` to keep any positive improvement (original behaviour). The convergence window also respects this threshold, so convergence detection actually works with noisy judges.
+A held-out slice of prompts (`holdout_fraction`, default 0.3) guards against overfitting: a KEEP on the training prompts is only accepted if it doesn't regress on the holdout set. Run `python3 tools/run_loop.py --measure-noise 3` to measure your own score noise floor before tuning these.
 
 ### Convergence detection
 
@@ -388,14 +407,14 @@ The loop reads the judge's reasoning, analyses weaknesses, modifies `SKILL.md`, 
 Enriched context: 2 worst samples: sample_3_quick_reply, sample_0_intro_email
 Analysing weaknesses and modifying skill...
 Change: Added "Keep emails under 200 words" rule
-Running exp_001...
+Running exp_001 (3 replicates/prompt)...
 COMPOSITE SCORE: 0.7185
-KEEP — score improved 0.6420 → 0.7185 (delta 0.0765 > threshold 0.01)
+KEEP — paired bootstrap CI excludes zero at 95% confidence (0.6420 → 0.7185); holdout non-regression confirmed
 ```
 
 ```
 Running exp_002... COMPOSITE SCORE: 0.7340 — KEEP
-Running exp_003... COMPOSITE SCORE: 0.7120 — DISCARD (delta 0.0000 below threshold 0.01)
+Running exp_003... COMPOSITE SCORE: 0.7120 — DISCARD (CI includes zero, not distinguishable from noise)
 Running exp_004... COMPOSITE SCORE: 0.7510 — KEEP
 ...
 Optimisation complete — 20 iterations in 1.3 hours
@@ -440,6 +459,8 @@ autoevaluation/
 ├── SKILL.md                  # The skill being optimised (your instructions)
 ├── SKILL.md.best             # Current best version (auto-managed)
 ├── results.tsv               # Full experiment history
+├── best_aggregate.json       # Best run's per-prompt scores, for paired comparison (gitignored)
+├── best_holdout_aggregate.json  # Best run's holdout-set scores (gitignored)
 ├── .env                      # API key (git-ignored)
 ├── .env.example              # Template showing required keys
 ├── .claude/settings.json     # Auto-approve rules for Claude Code (gitignored)
@@ -453,10 +474,12 @@ autoevaluation/
 │   ├── eval_deterministic.py # Rule-based metrics (optional, customisable)
 │   ├── eval_llm_judge.py     # LLM-as-judge metrics
 │   ├── score_aggregator.py   # Weighted composite scoring
+│   ├── decision.py           # Noise-aware KEEP/DISCARD (paired bootstrap CI + holdout check)
+│   ├── results_io.py         # results.tsv header-based read/update (CLI + library)
 │   ├── run_loop.py           # Standalone loop driver (headless)
 │   └── dashboard_server.py   # Live score dashboard
 ├── tests/
-│   └── test_smoke.py         # 68 tests (import, config, judge parsing, aggregation, loop logic)
+│   └── test_smoke.py         # 89 tests (import, config, judge parsing, aggregation, decision logic, loop logic)
 ├── examples/
 │   ├── writing-style/        # Full example: anti-AI writing style
 │   └── github-actions/       # GitHub Actions workflow (opt-in)
