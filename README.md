@@ -14,6 +14,7 @@ Point it at any LLM instruction set. Go to bed. Wake up with a measurably better
 - **[Configuration Reference](docs/CONFIG_REFERENCE.md)** — Complete guide to every config.yaml option
 - **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** — Common issues, entry point decisions, and fixes
 - **[Architecture & Design](docs/ARCHITECTURE.md)** — Why the system works this way, design trade-offs, and signal flow
+- **[Scheduled & Unattended Runs](docs/SCHEDULED_RUNS.md)** — `/loop`, Routines, cron, and the nightly regression sweep
 - **[Walkthrough](walkthrough.md)** — A historical new-user test report from an early version of the tool
 
 ## How it works
@@ -68,6 +69,8 @@ The full experiment history is in `examples/writing-style/sample-results.tsv`.
 1. **`/autoeval` in Claude Code (recommended)** — conversational setup, then a live dashboard, then autopilot. `start.sh` installs the skill automatically into `~/.claude/skills/`, so once you've run it once, just type `/autoeval` in Claude Code inside the project.
 2. **`python3 setup.py` + `python3 tools/run_loop.py`** — the interactive wizard followed by the headless driver. No Claude Code dependency.
 3. **`./start.sh`** — auto-detects your environment (Claude Code available or not) and picks the right path for you.
+
+Want it running unattended overnight, on a schedule, or on a server? See [Scheduled & unattended runs](docs/SCHEDULED_RUNS.md).
 
 See the [Getting Started guide](docs/GETTING_STARTED.md) for a full walkthrough, or [walkthrough.md](walkthrough.md) for a real first-run report.
 
@@ -360,6 +363,12 @@ max_concurrent: 4   # run 4 API calls in parallel
 Partial failures are handled gracefully. If 1 of 10 calls fails, the other 9 still count. Set to `1` for serial execution (default).
 
 ---
+
+## Subscription mode (experimental)
+
+`.claude/workflows/autoeval-eval.js` runs one evaluation pass entirely through Claude Code subagents — generation and judging both happen as subagent calls inside the session, needing no provider API key at all. Invoke it by asking Claude Code to "run the autoeval-eval workflow".
+
+This is experimental. The scores come from whatever model is powering the current Claude Code session, so they are **not comparable** with scores produced by the API-provider path (`generate_samples.py` / `eval_llm_judge.py` against `config.yaml`'s configured provider). Treat it as a no-API-key way to sanity-check a `SKILL.md` change, not as a substitute for the main loop's scoring.
 
 ## Always-on mode (GitHub Actions)
 

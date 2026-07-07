@@ -209,25 +209,38 @@ def validate_api_key(provider: str, model: str, api_key_env: str) -> bool:
 def write_all(
     skill_name: str,
     skill_description: str,
-    skill_content: str,
+    skill_content: str | None,
     provider: str,
     model: str,
     api_key_env: str,
     api_key: str,
     metrics: list[dict],
-    prompts: list[dict],
+    prompts: list[dict] | None,
     iterations: int,
     max_hours: float = 0,
     judge_provider: str = "",
     judge_model: str = "",
+    skill_path_config: str = "SKILL.md",
+    advanced: dict | None = None,
 ):
-    """Write all config files atomically."""
+    """Write all config files atomically.
 
-    # 1. .env
+    Shared by tools/generate_config.py's CLI (used by the /autoeval skill)
+    and setup.py (interactive wizard + --defaults mode) — this is the single
+    place config.yaml / .env / SKILL.md / prompts.json / settings.json /
+    .gitignore get written, so schema changes only happen once.
+
+    skill_content=None skips writing SKILL.md (e.g. an external file was
+    already copied into place). prompts=None skips writing prompts.json
+    likewise. advanced carries setup.py's optional judge_sees_skill /
+    replicates_per_prompt / convergence_window / max_cost_usd /
+    max_concurrent overrides.
+    """
+
+    # 1. .env — preserve existing keys, update/add the one we need
     env_path = PROJECT_ROOT / ".env"
     env_lines = []
     if env_path.exists():
-        # Preserve existing keys, update the one we need
         for line in env_path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#") and "=" in stripped:
@@ -244,7 +257,7 @@ def write_all(
         "provider": provider,
         "model": model,
         "api_key_env": api_key_env,
-        "skill_path": "SKILL.md",
+        "skill_path": skill_path_config,
         "prompts_path": "prompts/prompts.json",
         "results_tsv": "results.tsv",
         "max_iterations": iterations,
@@ -270,6 +283,12 @@ def write_all(
         config["judge_provider"] = judge_provider or provider
         config["judge_model"] = judge_model
         config["judge_api_key_env"] = DEFAULT_MODELS.get(judge_provider or provider, (None, api_key_env))[1]
+    if advanced:
+        config["judge_sees_skill"] = advanced.get("judge_sees_skill", True)
+        config["replicates_per_prompt"] = advanced.get("replicates_per_prompt", 3)
+        config["convergence_window"] = advanced.get("convergence_window", 0)
+        config["max_cost_usd"] = advanced.get("max_cost_usd", 0)
+        config["max_concurrent"] = advanced.get("max_concurrent", 1)
     cfg_path = PROJECT_ROOT / "config.yaml"
     cfg_path.write_text(
         yaml.dump(config, default_flow_style=False, sort_keys=False),
@@ -277,27 +296,32 @@ def write_all(
     )
     print("  ✓ config.yaml")
 
-    # 3. SKILL.md
-    skill_md = (
-        f"---\n"
-        f"name: {skill_name}\n"
-        f"description: {skill_description}\n"
-        f"---\n\n"
-        f"# {skill_name.replace('-', ' ').replace('_', ' ').title()} Rules\n\n"
-        f"{skill_content}\n"
-    )
-    skill_path = PROJECT_ROOT / "SKILL.md"
-    skill_path.write_text(skill_md, encoding="utf-8")
-    print("  ✓ SKILL.md")
+    # 3. SKILL.md (skip if skill_content is None — e.g. an external file was
+    # already copied into place, or the caller wants to keep the existing one)
+    if skill_content is not None:
+        skill_md = (
+            f"---\n"
+            f"name: {skill_name}\n"
+            f"description: {skill_description}\n"
+            f"---\n\n"
+            f"# {skill_name.replace('-', ' ').replace('_', ' ').title()} Rules\n\n"
+            f"{skill_content}\n"
+        )
+        skill_path = PROJECT_ROOT / skill_path_config
+        skill_path.write_text(skill_md, encoding="utf-8")
+        print(f"  ✓ {skill_path_config}")
 
-    # 4. prompts/prompts.json
-    prompts_dir = PROJECT_ROOT / "prompts"
-    prompts_dir.mkdir(exist_ok=True)
-    prompts_path = prompts_dir / "prompts.json"
-    prompts_path.write_text(json.dumps(prompts, indent=2), encoding="utf-8")
-    print(f"  ✓ prompts/prompts.json ({len(prompts)} prompts)")
+    # 4. prompts/prompts.json (skip if prompts is None)
+    if prompts is not None:
+        prompts_dir = PROJECT_ROOT / "prompts"
+        prompts_dir.mkdir(exist_ok=True)
+        prompts_path = prompts_dir / "prompts.json"
+        prompts_path.write_text(json.dumps(prompts, indent=2), encoding="utf-8")
+        print(f"  ✓ prompts/prompts.json ({len(prompts)} prompts)")
 
-    # 5. .claude/settings.json
+    # 5. .claude/settings.json — superset of permissions needed by both the
+    # /autoeval skill (generate_config.py) and the interactive setup wizard
+    # (sed-based KEEP/DISCARD tagging of results.tsv).
     claude_dir = PROJECT_ROOT / ".claude"
     claude_dir.mkdir(exist_ok=True)
     settings = {
@@ -318,6 +342,8 @@ def write_all(
                 "Bash(cp SKILL.md.best SKILL.md)",
                 "Bash(cp .tmp/evals/* best_aggregate.json)",
                 "Bash(cp .tmp/evals/* best_holdout_aggregate.json)",
+                "Bash(sed -i '' 's/*$/\\tKEEP/' results.tsv)",
+                "Bash(sed -i '' 's/*$/\\tDISCARD/' results.tsv)",
                 "Bash(cat *)",
                 "Bash(head *)",
                 "Bash(tail *)",
