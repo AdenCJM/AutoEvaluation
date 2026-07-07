@@ -4,67 +4,40 @@ This guide addresses common issues when setting up and running AutoEvaluation.
 
 ## Entry Points: Which Path Should I Take?
 
-The README shows three entry points (`start.sh`, `setup.py`, `run_loop.py`). This decision tree helps you pick the right one.
+The README shows three entry points (`/autoeval`, `start.sh`, `setup.py` + `run_loop.py`). This decision tree helps you pick the right one.
 
 ```
 Do you have Claude Code installed?
-├─ YES → Do you want autonomous hands-off optimisation?
-│        ├─ YES → Use: claude -p program.md
-│        │         (Skip to "Claude Code Path" below if it doesn't work)
-│        └─ NO  → Use: python3 tools/run_loop.py
+├─ YES → Use the /autoeval skill (conversational setup → dashboard → autopilot)
+│        installed automatically by start.sh into ~/.claude/skills/
 │
 └─ NO  → Use: python3 tools/run_loop.py
 ```
 
-### Claude Code Path Issues
+### Claude Code Entry Point
 
-**Issue:** Running `claude -p program.md` prints the file contents but doesn't start optimisation.
+**The entry point is the `/autoeval` skill**, not `claude -p program.md`. `start.sh` installs the skill automatically into `~/.claude/skills/`. Inside Claude Code, run `/autoeval` and it walks through three phases: conversational setup, dashboard, then autopilot.
 
-```bash
-$ claude -p program.md
-# Skill Optimisation Loop
-# You are running an autonomous optimisation loop...
-$ (returns to prompt, nothing happened)
-```
+`program.md` still exists and defines the loop spec, but it's read by the skill (or by the headless driver) rather than being run directly with `claude -p`. Running `claude -p program.md` directly is not a supported entry point — it will just print or describe the file rather than executing the loop.
 
-**Cause:** In some Claude Code versions, `-p` prints the file instead of executing it as instructions.
+### Headless Path (Always Works)
 
-**Fix:** Use the headless path instead:
-
-```bash
-python3 tools/run_loop.py --iterations 20
-```
-
-Or try the full command with the assistant system message:
-
-```bash
-claude --system "You are running an autonomous optimisation loop." -p program.md
-```
-
-**Check your version:**
-
-```bash
-claude --version
-```
-
-If you're on an older version of Claude Code, update it:
-
-```bash
-brew upgrade anthropic-claude
-# or
-npm install -g @anthropic-ai/claude
-```
-
-### Headless Path (Recommended)
-
-The headless path **always works**:
+The headless path **always works** and doesn't depend on Claude Code at all:
 
 ```bash
 # Make sure your venv is activated and config.yaml exists
 python3 tools/run_loop.py --iterations 10
 ```
 
-This is the most reliable entry point. It doesn't depend on Claude Code version or integration; it's a standard Python script.
+This is the most reliable entry point. It's a standard Python script with no Claude Code dependency.
+
+To measure how noisy your judge/prompt set is before trusting KEEP/DISCARD decisions:
+
+```bash
+python3 tools/run_loop.py --measure-noise 3
+```
+
+This runs the same baseline configuration 3 times and reports the score variance, so you know whether your `accept_confidence` and `replicates_per_prompt` settings are appropriate.
 
 ---
 
@@ -120,7 +93,7 @@ Error: GEMINI_API_KEY not found in environment
 
 ```yaml
 provider: gemini  # ← The example hardcodes this
-model: gemini-2.5-flash
+model: gemini-3.5-flash
 api_key_env: GEMINI_API_KEY
 ```
 
@@ -128,7 +101,7 @@ api_key_env: GEMINI_API_KEY
 
 ```yaml
 provider: openai
-model: gpt-4o
+model: gpt-5.4
 api_key_env: OPENAI_API_KEY
 ```
 
@@ -285,28 +258,36 @@ Iteration 3: 0.5103  (huge drop)
 Iteration 4: 0.8234  (huge jump)
 ```
 
-**Cause:** Your LLM judge is inconsistent. This is common with cheaper models on subjective metrics.
+**Cause:** Your LLM judge is inconsistent, or you're comparing single-sample scores that carry natural variance.
 
 **Fix:**
 
-1. **Use a more consistent judge model**:
+1. **Measure the noise floor first**:
+   ```bash
+   python3 tools/run_loop.py --measure-noise 3
+   ```
+   This tells you how much a score moves run-to-run with no change at all, so you know if the default `accept_confidence` (0.95) is calibrated for your setup.
+
+2. **Increase `replicates_per_prompt`** (default 3) so each experiment averages over more completions per prompt:
    ```yaml
-   judge_provider: openai
-   judge_model: gpt-4  # Pricier but more consistent
-   judge_api_key_env: OPENAI_API_KEY
+   replicates_per_prompt: 5
    ```
 
-2. **Increase the `min_improvement` threshold** to filter noise:
+3. **Rely on the paired decision rule** (`accept_rule: paired`, the default). KEEP/DISCARD is decided by a per-prompt paired bootstrap confidence interval (see `tools/decision.py`), not a bare score comparison, so genuine noise is far less likely to be mistaken for improvement. If you're still on the legacy `accept_rule: simple`, switch to `paired`.
+
+4. **Use a more consistent judge model**:
    ```yaml
-   min_improvement: 0.05  # Only keep changes with 5%+ improvement (instead of default 1%)
+   judge_provider: anthropic
+   judge_model: claude-haiku-4-5   # cheap and consistent, recommended default judge
+   judge_api_key_env: ANTHROPIC_API_KEY
    ```
 
-3. **Increase the number of test prompts** to average out variance:
+5. **Increase the number of test prompts** to average out variance:
    ```json
    // In prompts/prompts.json, add more prompts (target: 8-10)
    ```
 
-4. **Make your rubrics more objective**:
+6. **Make your rubrics more objective**:
    - Instead of "Is this high quality?" → "Does it follow these 3 specific rules?"
    - Objective criteria are easier for LLMs to judge consistently.
 
@@ -386,23 +367,34 @@ ls -la SKILL.md SKILL.md.best
 
 ### Issue: Dashboard won't start
 
-**Symptom:**
+`tools/dashboard_server.py` is stdlib-only (plus PyYAML for config parsing); Chart.js loads from a CDN in the browser. There's no `dash`/`plotly`/`pandas` dependency to install. If it won't start, check these instead:
 
-```
-$ python3 tools/dashboard_server.py
-Error: Module 'dash' not found
-```
+1. **Port already in use**
 
-**Cause:** Dashboard dependencies aren't installed.
+   ```
+   OSError: [Errno 48] Address already in use
+   ```
 
-**Fix:**
+   Something else is bound to 8050. Start on a different port:
 
-```bash
-pip install dash plotly pandas
-python3 tools/dashboard_server.py
-```
+   ```bash
+   python3 tools/dashboard_server.py --port 8051
+   ```
 
-The dashboard is optional; if you don't need it, ignore this error.
+2. **`config.yaml` missing**
+
+   The dashboard reads `config.yaml` and `results.tsv` to render scores. If `config.yaml` doesn't exist yet, run `python3 setup.py` first (see "Issue: config.yaml missing" above).
+
+3. **`python3` not on PATH / wrong interpreter**
+
+   ```bash
+   which python3
+   python3 --version   # should be 3.10+
+   ```
+
+   If `python3` resolves to a different interpreter than the one with your dependencies installed, activate the project's virtual environment first.
+
+The dashboard is optional; if you don't need it, the headless loop and `results.tsv` work fine without it.
 
 ---
 
@@ -423,7 +415,7 @@ The dashboard is optional; if you don't need it, ignore this error.
 
 1. **Switch to a faster model**:
    ```yaml
-   model: gemini-2.5-flash  # Faster and cheaper than gpt-4o
+   model: gemini-3.1-flash-lite  # Faster and cheaper than the default gemini-3.5-flash
    ```
 
 2. **Reduce test prompts** (temporarily, for testing):

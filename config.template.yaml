@@ -4,26 +4,49 @@
 
 # --- Provider ---
 # Supported: gemini, openai, anthropic
+# Current defaults (verified July 2026):
+#   gemini:    gemini-3.5-flash   (balanced) | gemini-3.1-flash-lite (cheap)
+#   openai:    gpt-5.4            (balanced) | gpt-5.4-mini (cheap)
+#   anthropic: claude-sonnet-5    (balanced) | claude-opus-4-8 (max quality) | claude-haiku-4-5 (cheap)
+# Model lines turn over fast — if cost tracking warns about unknown pricing,
+# update the model here and the pricing table in tools/model_client.py.
 provider: gemini
-model: gemini-2.5-flash
+model: gemini-3.5-flash
 api_key_env: GEMINI_API_KEY   # name of the env var in .env holding your API key
 
-# --- Judge (optional, defaults to primary provider) ---
-# Use a separate model for evaluation to avoid self-judging bias.
-# If omitted, the primary provider/model is used for judging too.
-# judge_provider: openai
-# judge_model: gpt-4o
-# judge_api_key_env: OPENAI_API_KEY
+# --- Judge (recommended) ---
+# Use a separate model for evaluation to avoid self-judging bias — the same
+# model generating and judging tends to reward its own style. A cheaper model
+# from the same provider works well; a different provider is even better if
+# you have a second key.
+# judge_provider: gemini
+# judge_model: gemini-3.1-flash-lite
+# judge_api_key_env: GEMINI_API_KEY
 
 # --- Semi-Blind Judge ---
 # When true, the judge sees SKILL.md content for the task_accuracy
 # dimension only. Other dimensions are still evaluated blind.
-judge_sees_skill: false
+# Recommended: true (task adherence can't be judged without the task).
+judge_sees_skill: true
 
 # --- Paths ---
 skill_path: SKILL.md
 prompts_path: prompts/prompts.json
 results_tsv: results.tsv
+
+# --- Evaluation statistics ---
+# These control how much signal each experiment produces and how KEEP/DISCARD
+# decisions are made. LLM-judge scores are noisy run-to-run; single-draw
+# comparisons mostly measure that noise.
+replicates_per_prompt: 3   # completions generated per prompt (higher = less noise, more cost)
+accept_rule: paired        # paired = per-prompt bootstrap comparison vs best (recommended)
+                           # simple = bare composite delta vs min_improvement (legacy)
+accept_confidence: 0.95    # confidence level for the paired accept rule
+min_valid_sample_frac: 0.8 # abort scoring if fewer than this fraction of samples judged OK
+holdout_fraction: 0.3      # fraction of prompts reserved for validating KEEPs (0 = disabled)
+                           # Prompts can also carry an explicit "split": "holdout" in prompts.json
+min_improvement: 0.01      # only used by accept_rule: simple — run
+                           # `python3 tools/run_loop.py --measure-noise 3` to size it
 
 # --- Run Duration ---
 # Control how long the optimisation loop runs. Set one or both.
@@ -32,11 +55,12 @@ results_tsv: results.tsv
 max_iterations: 0     # stop after N experiments (0 = unlimited)
 max_hours: 0          # stop after N hours (0 = unlimited, accepts decimals e.g. 1.5)
 max_cost_usd: 0       # stop after estimated spend exceeds this (0 = unlimited)
+                      # NOTE: only works when the model has a pricing entry in
+                      # tools/model_client.py — the loop warns at startup if not
 convergence_window: 0 # stop after N iterations with no improvement (0 = disabled)
-min_improvement: 0.01 # only KEEP changes with score delta above this threshold (filters noise)
 
 # --- Performance ---
-max_concurrent: 1     # parallel LLM calls for generation and evaluation (1 = serial)
+max_concurrent: 4     # parallel LLM calls for generation and evaluation (1 = serial)
 
 # --- LLM Judge Dimensions ---
 # Each dimension is scored 1–5 by the LLM, normalised to 0–1, then weighted.
@@ -46,16 +70,21 @@ max_concurrent: 1     # parallel LLM calls for generation and evaluation (1 = se
 #   - higher_is_better: score goes up = good (e.g. quality, accuracy)
 #   - lower_is_better: score goes up = bad (e.g. error rate, lag time)
 #   For lower_is_better metrics, the score is inverted (1 - raw) before weighting.
+#
+# Rubric-writing tip: ask the judge only for things it can observe in the text.
+# "Detect whether this is AI-generated" is unreliable; "does sentence length
+# vary / are there filler phrases" is checkable.
 llm_judge_dimensions:
-  - name: human_score
+  - name: natural_voice
     weight: 0.30
     direction: higher_is_better
     rubric: |
-      Does this read like a competent human wrote it, or does it have telltale
-      patterns of AI-generated text? Look for overly consistent paragraph lengths,
-      repetitive sentence structures, and words humans rarely use.
-      1 = obviously AI-generated
-      5 = indistinguishable from skilled human writer
+      Judge only observable features of the prose: sentence and paragraph
+      length vary naturally; no stock filler phrases ("it's important to
+      note", "in today's world", "delve"); concrete word choice over abstract
+      hedging; transitions read as thought, not as template.
+      1 = formulaic and templated
+      5 = varied, specific, natural
 
   - name: task_accuracy
     weight: 0.40

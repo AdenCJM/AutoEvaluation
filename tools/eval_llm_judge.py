@@ -15,7 +15,6 @@ Usage:
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -56,11 +55,41 @@ def build_judge_prompt(dimensions: list[dict], skill_content: str = None) -> str
         response_format[dim["name"]] = {"score": "N", "reason": "..."}
 
     lines.append(
+        "Judge quality, not quantity: do NOT reward an output for being longer "
+        "or more detailed unless the task explicitly asked for it.\n"
+    )
+
+    lines.append(
         "You MUST respond with ONLY valid JSON in exactly this format:"
     )
     lines.append(json.dumps(response_format))
 
     return "\n".join(lines)
+
+
+def build_judge_schema(dimensions: list[dict]) -> dict:
+    """JSON Schema for the judge response, built from config dimensions.
+
+    Passed to ModelClient.generate_structured so providers with native
+    structured output cannot return malformed scores.
+    """
+    props = {}
+    for dim in dimensions:
+        props[dim["name"]] = {
+            "type": "object",
+            "properties": {
+                "score": {"type": "integer", "enum": [1, 2, 3, 4, 5]},
+                "reason": {"type": "string"},
+            },
+            "required": ["score", "reason"],
+            "additionalProperties": False,
+        }
+    return {
+        "type": "object",
+        "properties": props,
+        "required": list(props),
+        "additionalProperties": False,
+    }
 
 
 def judge_sample(
@@ -69,38 +98,37 @@ def judge_sample(
     client: ModelClient,
     skill_content: str = None,
 ) -> dict:
-    """Send sample to LLM judge and parse scores."""
+    """Send sample to LLM judge and return normalised scores.
+
+    Uses structured output (schema-enforced JSON where the provider supports
+    it), retrying once on failure. A failed judge call returns a result with
+    an "error" key — the aggregator excludes such samples rather than
+    treating them as zero-score outputs.
+    """
     system_prompt = build_judge_prompt(dimensions, skill_content=skill_content)
+    schema = build_judge_schema(dimensions)
+    user_prompt = f"Evaluate this output:\n\n---\n{sample_text}\n---"
 
-    response_text = client.generate(
-        system_prompt=system_prompt,
-        user_prompt=f"Evaluate this output:\n\n---\n{sample_text}\n---",
-        max_tokens=2048,
-    )
+    scores = None
+    last_error = None
+    for attempt in range(2):
+        try:
+            scores = client.generate_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema=schema,
+                max_tokens=2048,
+            )
+            break
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                print(f"  Judge call failed ({type(e).__name__}), retrying once...", file=sys.stderr)
 
-    # Parse JSON from response (handle markdown code blocks)
-    json_text = response_text.strip()
-    if json_text.startswith("```"):
-        json_text = re.sub(r'^```(?:json)?\s*', '', json_text)
-        json_text = re.sub(r'\s*```$', '', json_text)
-
-    try:
-        scores = json.loads(json_text)
-    except json.JSONDecodeError:
-        # Try to extract JSON object from the response
-        match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
-        if match:
-            try:
-                scores = json.loads(match.group())
-            except json.JSONDecodeError:
-                scores = None
-        else:
-            scores = None
-
-    if scores is None:
-        result = {"error": "Failed to parse judge response", "raw_response": response_text}
+    if not isinstance(scores, dict):
+        result = {"error": f"Judge call failed: {type(last_error).__name__}: {last_error}"}
         for dim in dimensions:
-            result[dim["name"]] = {"score": 0, "normalised": 0.0, "reason": "parse error"}
+            result[dim["name"]] = {"score": 0, "normalised": 0.0, "reason": "judge error"}
         return result
 
     # Normalise 1-5 scores to 0-1

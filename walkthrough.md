@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-28  
 **Tested from:** Fresh clone → full optimization run  
-**Provider used:** OpenAI (gpt-4o) — the README defaults to Gemini but the user had OpenAI available  
+**Provider used:** OpenAI (the default OpenAI model at the time of this test, since retired) — the README defaults to Gemini but the user had OpenAI available. [Note July 2026: model defaults have since moved on; see README/CONFIG_REFERENCE for current IDs.]  
 
 ---
 
@@ -47,6 +47,8 @@ Had to manually update `config.yaml` to switch from `gemini` → `openai` provid
 > **Claude Code detection issue:** `start.sh` detected Claude Code was installed and ran `claude -p program.md`. However, Claude just printed the contents of `program.md` and exited — it didn't actually execute the optimization loop. A new user with Claude Code installed but wanting headless mode would be stuck.
 >
 > The script assumes `claude -p` will execute the program, but `claude -p` in current versions appears to just print/describe the file rather than run it as instructions.
+>
+> [Fixed July 2026: the Claude Code entry point is now the `/autoeval` skill, installed automatically by `start.sh` into `~/.claude/skills/`. `claude -p program.md` was never a supported invocation; `program.md` is the loop spec the skill and the headless driver both follow, not something to run directly.]
 
 **Workaround:** Run the loop directly:
 ```bash
@@ -97,6 +99,7 @@ All expected files were created:
 ### 🔴 Critical: `claude -p program.md` doesn't work as expected
 - **Impact:** Any user who has Claude Code installed will hit this — `start.sh` auto-detects Claude Code and uses it, but the `claude -p` command doesn't run the optimization loop
 - **Fix suggestion:** Either document this limitation or add a `--headless` flag to `start.sh` to force `python3 tools/run_loop.py`
+- **[Fixed July 2026: use `/autoeval`]** — `start.sh` now installs the `/autoeval` Claude Code skill instead of relying on `claude -p program.md`. The skill runs conversational setup, dashboard, and autopilot phases directly.
 
 ### 🟡 Medium: Example config hardcodes Gemini
 - **Impact:** Users with OpenAI or Anthropic keys need to manually edit `config.yaml` after copying the example
@@ -121,3 +124,5 @@ All expected files were created:
 
 > [!TIP]
 > **Bottom line:** The headless path (`python3 tools/run_loop.py`) is excellent. Clean output, clear progress, intuitive scoring display. The main friction point is the Claude Code detection in `start.sh` — either fix the `claude -p` integration or default to headless mode.
+>
+> [Fixed July 2026: use `/autoeval`. This report predates the skill-based entry point.]
