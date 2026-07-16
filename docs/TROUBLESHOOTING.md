@@ -18,7 +18,7 @@ Do you have Claude Code installed?
 
 **The entry point is the `/autoeval` skill**, not `claude -p program.md`. `start.sh` installs the skill automatically into `~/.claude/skills/`. Inside Claude Code, run `/autoeval` and it walks through three phases: conversational setup, dashboard, then autopilot.
 
-`program.md` still exists and defines the loop spec, but it's read by the skill (or by the headless driver) rather than being run directly with `claude -p`. Running `claude -p program.md` directly is not a supported entry point — it will just print or describe the file rather than executing the loop.
+`program.md` is a short agent-facing runbook that delegates to `tools/run_loop.py`, the executable source of truth. Running `claude -p program.md` directly is not a supported entry point.
 
 ### Headless Path (Always Works)
 
@@ -273,7 +273,7 @@ Iteration 4: 0.8234  (huge jump)
    replicates_per_prompt: 5
    ```
 
-3. **Rely on the paired decision rule** (`accept_rule: paired`, the default). KEEP/DISCARD is decided by a per-prompt paired bootstrap confidence interval (see `tools/decision.py`), not a bare score comparison, so genuine noise is far less likely to be mistaken for improvement. If you're still on the legacy `accept_rule: simple`, switch to `paired`.
+3. **Rely on the paired decision rule** (`accept_rule: paired`, the default). KEEP/DISCARD uses a hierarchical bootstrap over prompts and replicates plus repeated-testing correction. Fewer than eight shared training prompts intentionally degrade to a threshold rule, so add prompts before interpreting a result as statistical evidence.
 
 4. **Use a more consistent judge model**:
    ```yaml
@@ -284,7 +284,7 @@ Iteration 4: 0.8234  (huge jump)
 
 5. **Increase the number of test prompts** to average out variance:
    ```json
-   // In prompts/prompts.json, add more prompts (target: 8-10)
+   // In prompts/prompts.json, add more prompts (target: about 30)
    ```
 
 6. **Make your rubrics more objective**:

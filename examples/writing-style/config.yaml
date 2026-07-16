@@ -26,6 +26,15 @@ convergence_window: 10
 # --- Performance ---
 max_concurrent: 3
 
+# --- Evaluation protocol ---
+replicates_per_prompt: 3
+accept_rule: paired
+accept_confidence: 0.95
+sequential_correction: true
+holdout_fraction: 0.3
+final_test_fraction: 0.2
+min_valid_sample_frac: 0.8
+
 # --- LLM Judge Dimensions ---
 # Weights across all metrics (LLM + deterministic) sum to 1.0.
 llm_judge_dimensions:

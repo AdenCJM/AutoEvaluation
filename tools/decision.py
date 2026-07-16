@@ -29,7 +29,7 @@ from pathlib import Path
 
 BOOTSTRAP_ITERATIONS = 2000
 BOOTSTRAP_SEED = 42
-MIN_PAIRS_FOR_BOOTSTRAP = 3
+MIN_PAIRS_FOR_BOOTSTRAP = 8
 
 
 def _paired_deltas(candidate_per_prompt: dict, best_per_prompt: dict) -> list[float]:
@@ -49,6 +49,40 @@ def _bootstrap_ci(deltas: list[float], confidence: float) -> tuple[float, float]
     for _ in range(BOOTSTRAP_ITERATIONS):
         resample = [deltas[rng.randrange(n)] for _ in range(n)]
         means.append(sum(resample) / n)
+    means.sort()
+    alpha = 1.0 - confidence
+    lo_idx = int((alpha / 2) * BOOTSTRAP_ITERATIONS)
+    hi_idx = min(BOOTSTRAP_ITERATIONS - 1, int((1 - alpha / 2) * BOOTSTRAP_ITERATIONS))
+    return means[lo_idx], means[hi_idx]
+
+
+def _hierarchical_bootstrap_ci(
+    candidate_per_prompt: dict,
+    best_per_prompt: dict,
+    confidence: float,
+) -> tuple[float, float]:
+    """Bootstrap prompts and stochastic replicates within each prompt.
+
+    Candidate and baseline generations are independent, so replicate draws are
+    resampled within each arm before their prompt-level means are differenced.
+    Older aggregates without replicate arrays transparently degrade to their
+    stored prompt means.
+    """
+    rng = random.Random(BOOTSTRAP_SEED)
+    shared = sorted(set(candidate_per_prompt) & set(best_per_prompt))
+    means = []
+    for _ in range(BOOTSTRAP_ITERATIONS):
+        prompt_deltas = []
+        for _ in shared:
+            pid = shared[rng.randrange(len(shared))]
+            c = candidate_per_prompt[pid]
+            b = best_per_prompt[pid]
+            c_values = c.get("replicates") or [float(c["composite"])]
+            b_values = b.get("replicates") or [float(b["composite"])]
+            c_draw = [float(c_values[rng.randrange(len(c_values))]) for _ in c_values]
+            b_draw = [float(b_values[rng.randrange(len(b_values))]) for _ in b_values]
+            prompt_deltas.append(statistics.mean(c_draw) - statistics.mean(b_draw))
+        means.append(statistics.mean(prompt_deltas))
     means.sort()
     alpha = 1.0 - confidence
     lo_idx = int((alpha / 2) * BOOTSTRAP_ITERATIONS)
@@ -98,7 +132,18 @@ def paired_verdict(
                       f"required mean delta {'>' if mode == 'keep' else '>= -'}{min_improvement}",
         }
 
-    ci_low, ci_high = _bootstrap_ci(deltas, confidence)
+    has_replicates = all(
+        candidate_per_prompt[p].get("replicates") and best_per_prompt[p].get("replicates")
+        for p in set(candidate_per_prompt) & set(best_per_prompt)
+    )
+    if has_replicates:
+        ci_low, ci_high = _hierarchical_bootstrap_ci(
+            candidate_per_prompt, best_per_prompt, confidence
+        )
+        method = "hierarchical-bootstrap"
+    else:
+        ci_low, ci_high = _bootstrap_ci(deltas, confidence)
+        method = "paired-bootstrap"
     if mode == "non-regression":
         keep = ci_high >= 0  # reject only if significantly worse
         reason = (
@@ -114,7 +159,7 @@ def paired_verdict(
 
     return {
         "keep": keep,
-        "method": "paired-bootstrap",
+        "method": method,
         "mode": mode,
         "mean_delta": round(mean_delta, 4),
         "delta_stddev": round(stddev, 4),
@@ -146,13 +191,26 @@ def decide(candidate_agg: dict, best_agg: dict | None, cfg: dict, mode: str = "k
                       + ("" if rule == "simple" else " (per-prompt data unavailable, fell back to simple rule)"),
         }
 
+    confidence = float(cfg.get("accept_confidence", 0.95))
+    if mode == "keep" and cfg.get("sequential_correction", True):
+        # Alpha-spending schedule: alpha_k = alpha / (k * (k + 1)).
+        # Since sum(1/(k(k+1))) == 1, the family-wise false-positive budget
+        # remains bounded across an arbitrarily long or resumed campaign.
+        index = max(1, int(cfg.get("_decision_index", 1)))
+        alpha = (1.0 - confidence) / (index * (index + 1))
+        confidence = 1.0 - alpha
+
     verdict = paired_verdict(
         candidate_agg["per_prompt"],
         best_agg["per_prompt"],
-        confidence=float(cfg.get("accept_confidence", 0.95)),
+        confidence=confidence,
         mode=mode,
         min_improvement=float(cfg.get("min_improvement", 0.01)),
     )
+    if mode == "keep" and cfg.get("sequential_correction", True):
+        verdict["sequential_correction"] = "alpha-spending"
+        verdict["decision_index"] = max(1, int(cfg.get("_decision_index", 1)))
+        verdict["configured_confidence"] = float(cfg.get("accept_confidence", 0.95))
     verdict["candidate_composite"] = candidate_score
     verdict["best_composite"] = best_score
     return verdict

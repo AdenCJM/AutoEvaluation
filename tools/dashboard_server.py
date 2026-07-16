@@ -108,7 +108,8 @@ def read_tsv(tsv_path: str, metric_config: dict) -> dict:
         return {"runs": [], "best": None, "latest": None, "first": None,
                 "metric_names": metric_names, "metric_labels": metric_config.get("metric_labels", {})}
 
-    best = max(runs, key=lambda r: r["composite_score"]) if runs else None
+    accepted = [r for r in runs if (r.get("decision") or "").upper() in {"BASELINE", "KEEP"}]
+    best = max(accepted, key=lambda r: r["composite_score"]) if accepted else None
     latest = runs[-1] if runs else None
     first = runs[0] if runs else None
 
@@ -137,6 +138,27 @@ def read_status() -> dict:
         return json.loads(status_path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def read_final_test() -> dict | None:
+    """Return the untouched final-test audit when the campaign is finalised."""
+    baseline_path = PROJECT_ROOT / "baseline_final_test_aggregate.json"
+    final_path = PROJECT_ROOT / "final_test_aggregate.json"
+    if not final_path.exists():
+        return None
+    try:
+        final_score = json.loads(final_path.read_text(encoding="utf-8"))["composite_score"]
+        baseline_score = (
+            json.loads(baseline_path.read_text(encoding="utf-8"))["composite_score"]
+            if baseline_path.exists() else None
+        )
+        return {
+            "score": final_score,
+            "baseline": baseline_score,
+            "delta": final_score - baseline_score if baseline_score is not None else None,
+        }
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return None
 
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -670,6 +692,11 @@ tr:hover td { background: var(--bg-card-hover); }
             <div class="value" id="hdr-runs">0</div>
             <div class="sub" id="hdr-keep-rate"></div>
         </div>
+        <div class="hero-stat">
+            <div class="label">Final Test</div>
+            <div class="value" id="hdr-final">&mdash;</div>
+            <div class="sub" id="hdr-final-delta">Untouched</div>
+        </div>
     </div>
     </div>
 </div>
@@ -844,7 +871,8 @@ async function fetchData() {
 
 function dataHash(data) {
     const runStatus = data.run_status ? data.run_status.status + "_" + (data.run_status.current_iteration || 0) : "";
-    return data.runs.length + "_" + (data.latest ? data.latest.composite_score : 0) + "_" + runStatus;
+    return data.runs.length + "_" + (data.latest ? data.latest.composite_score : 0) + "_" +
+        (data.final_test ? data.final_test.score : "pending") + "_" + runStatus;
 }
 
 function formatDuration(ms) {
@@ -907,6 +935,12 @@ function updateHeader(data) {
             el.textContent = sign + (delta * 100).toFixed(1) + "% from start";
             el.className = "delta " + (delta > 0 ? "positive" : delta < 0 ? "negative" : "neutral");
         }
+    }
+    if (data.final_test) {
+        document.getElementById("hdr-final").textContent = pctInt(data.final_test.score);
+        const delta = data.final_test.delta;
+        document.getElementById("hdr-final-delta").textContent =
+            delta == null ? "Baseline unavailable" : ((delta >= 0 ? "+" : "") + (delta * 100).toFixed(1) + "% vs baseline");
     }
 
     // Fallback: use change_description if decision is null (legacy data)
@@ -1342,6 +1376,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/results":
             data = read_tsv(self.tsv_path, self.metric_config)
             data["run_status"] = read_status()
+            data["final_test"] = read_final_test()
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

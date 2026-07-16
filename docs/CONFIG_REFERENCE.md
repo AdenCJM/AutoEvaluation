@@ -23,7 +23,7 @@ This document explains every option in `config.yaml`. See [Getting Started](GETT
   - Model: `claude-sonnet-5` (default), `claude-opus-4-8` (max quality), `claude-haiku-4-5` (cheap, good judge)
   - API key: `ANTHROPIC_API_KEY`
 
-Model IDs move fast. The source of truth is `DEFAULT_MODELS` in `tools/utils.py` and `_PRICING` in `tools/model_client.py` — check those if a model you're using isn't listed here. Unknown models still work but print a cost-tracking warning, and `max_cost_usd` only enforces a budget for models with a pricing entry.
+Model IDs move fast. The source of truth is `DEFAULT_MODELS` in `tools/utils.py` and `_PRICING` in `tools/model_client.py`. Unknown models work when cost capping is disabled. With `max_cost_usd` set, startup fails until every configured model has a pricing entry.
 
 ---
 
@@ -213,7 +213,7 @@ max_hours: 0          # No limit
 **Default:** `0` (unlimited)  
 **What it does:** Stop when estimated API spend exceeds this amount (USD).
 
-Cost is tracked from token counts and provider pricing, not actual billing.
+Cost is tracked from token counts and standard provider list pricing, not actual billing. Time-limited promotions are intentionally excluded so guards remain conservative. If `max_cost_usd` is non-zero, the loop refuses to start when either the generation/modifier model or judge model lacks a pricing entry.
 
 **Examples:**
 ```yaml
@@ -265,7 +265,7 @@ min_improvement: 0        # KEEP any positive improvement (risky with noisy judg
 
 ## Evaluation Statistics
 
-LLM-judge scores are noisy run-to-run. A single-draw comparison ("0.7185 vs 0.7120, so KEEP") mostly measures that noise, not a real improvement. These keys, added in the July 2026 modernisation, make the KEEP/DISCARD decision statistically sound. All are documented with defaults in `config.template.yaml`.
+LLM-judge scores are noisy run-to-run. A single-draw comparison ("0.7185 vs 0.7120, so KEEP") mostly measures that noise. These settings improve the evidence available to the decision rule, but they do not turn a small prompt suite into proof. Use the untouched final test and repeated campaigns for publishable claims.
 
 ### `replicates_per_prompt`
 **Type:** `integer` (≥ 1)  
@@ -281,7 +281,7 @@ replicates_per_prompt: 3   # default; raise to 5+ if --measure-noise shows high 
 **Default:** `paired`  
 **What it does:** How KEEP/DISCARD is decided.
 
-- **`paired` (default)** — `tools/decision.py` runs a per-prompt paired bootstrap confidence interval between the candidate and current best. KEEP requires the CI (at `accept_confidence`) to exclude zero, i.e. the improvement is unlikely to be noise.
+- **`paired` (default)** — `tools/decision.py` hierarchically resamples prompts and replicate scores between the candidate and current best. With at least eight shared prompts, KEEP requires the corrected interval to exclude zero. Smaller sets report `paired-degraded` and use `min_improvement`.
 - **`simple`** — legacy behaviour: KEEP if `composite_score` delta exceeds `min_improvement`. No noise awareness.
 
 ```yaml
@@ -292,7 +292,7 @@ accept_rule: simple   # legacy min_improvement threshold
 ### `accept_confidence`
 **Type:** `float` (0.0 to 1.0)  
 **Default:** `0.95`  
-**What it does:** Confidence level for the paired bootstrap CI under `accept_rule: paired`. Only used when `accept_rule` is `paired`.
+**What it does:** Base confidence for the hierarchical bootstrap under `accept_rule: paired`. With `sequential_correction: true`, candidate test `k` spends `alpha / (k × (k + 1))`, including across resumed runs.
 
 ```yaml
 accept_confidence: 0.95   # 95% CI must exclude zero to KEEP
@@ -302,11 +302,29 @@ accept_confidence: 0.90   # looser bar, more KEEPs, more risk of noise slipping 
 ### `holdout_fraction`
 **Type:** `float` (0.0 to 1.0)  
 **Default:** `0.3`  
-**What it does:** Fraction of prompts reserved as a holdout set, not used to decide KEEP/DISCARD directly. The last ~30% of prompts in `prompts.json` are held out by default; you can instead mark specific prompts explicitly with `"split": "holdout"`. A KEEP on the training prompts is only accepted if the candidate skill also shows non-regression on the holdout set — this is the overfitting guard. Set to `0` to disable holdout validation entirely.
+**What it does:** Fraction of prompts reserved as the validation gate. These prompts are not used for the training interval, but their non-regression verdict does affect KEEP/DISCARD and therefore they are not a final test. Explicit `"split": "holdout"` and `"split": "validation"` are both accepted.
 
 ```yaml
 holdout_fraction: 0.3   # last ~30% of prompts, or explicit "split": "holdout" entries
 holdout_fraction: 0     # disabled — no overfitting guard
+```
+
+### `final_test_fraction`
+
+**What it does:** Reserves an untouched final-test slice. It is scored for the baseline and once after the loop, but never affects candidate selection.
+
+```yaml
+final_test_fraction: 0.2
+```
+
+You can explicitly assign prompts with `"split": "final_test"`. If you inspect the result and then continue optimising, create a new final-test set before making another publishable claim.
+
+### `sequential_correction`
+
+**What it does:** Applies an alpha-spending schedule whose cumulative budget remains bounded across arbitrarily long or resumed campaigns.
+
+```yaml
+sequential_correction: true
 ```
 
 ### `min_valid_sample_frac`
@@ -532,6 +550,8 @@ replicates_per_prompt: 3
 accept_rule: paired
 accept_confidence: 0.95
 holdout_fraction: 0.3
+final_test_fraction: 0.2
+sequential_correction: true
 min_valid_sample_frac: 0.8
 
 # Duration
@@ -636,10 +656,12 @@ Use `python3 tools/results_io.py --help` to update the last row of an existing `
 
 ## best_*.json Files
 
-Two gitignored JSON files in the project root persist the best run's per-prompt scores, so the paired bootstrap comparison in `tools/decision.py` has something to compare the next candidate against:
+Gitignored JSON files in the project root persist the per-prompt references used by the statistical comparison and final audit:
 
 - **`best_aggregate.json`** — per-prompt scores for the best run on the training prompt set
 - **`best_holdout_aggregate.json`** — per-prompt scores for the best run on the holdout prompt set (only populated if `holdout_fraction` > 0)
+- **`baseline_final_test_aggregate.json`** — baseline score on the untouched final-test split
+- **`final_test_aggregate.json`** — best skill's one-time final-test audit
 
 Both are regenerated automatically whenever a KEEP happens. You shouldn't need to edit them by hand; delete them if you want to reset the paired comparison baseline (the next experiment will then compare only against `results.tsv`'s recorded best score).
 

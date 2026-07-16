@@ -11,7 +11,8 @@ blank for the new columns).
 """
 
 import csv
-import sys
+import os
+import uuid
 from pathlib import Path
 
 BASE_COLUMNS = ["run_id", "timestamp", "composite_score"]
@@ -41,13 +42,13 @@ def read_rows(tsv_path: Path) -> list[dict]:
 
 
 def _atomic_write(tsv_path: Path, content: str) -> None:
-    tmp_path = tsv_path.with_suffix(".tsv.tmp")
+    tsv_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = tsv_path.with_name(f".{tsv_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         tmp_path.write_text(content, encoding="utf-8")
-        tmp_path.rename(tsv_path)
-    except OSError as e:
-        print(f"Warning: Atomic write failed ({e}), falling back to direct write", file=sys.stderr)
-        tsv_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, tsv_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def ensure_header(tsv_path: Path, metric_names: list[str]) -> list[str]:
@@ -55,7 +56,7 @@ def ensure_header(tsv_path: Path, metric_names: list[str]) -> list[str]:
     to include any missing EXTRA_COLUMNS. Returns the effective header."""
     if not tsv_path.exists():
         header = expected_header(metric_names)
-        tsv_path.write_text("\t".join(header) + "\n", encoding="utf-8")
+        _atomic_write(tsv_path, "\t".join(header) + "\n")
         return header
 
     header = read_header(tsv_path)
@@ -69,12 +70,11 @@ def ensure_header(tsv_path: Path, metric_names: list[str]) -> list[str]:
 
 
 def append_row(tsv_path: Path, values: dict, metric_names: list[str]) -> None:
-    """Append one row, ordering fields by the file's actual header.
-    Unknown header columns are written blank."""
+    """Atomically append one row in the file's actual header order."""
     header = ensure_header(tsv_path, metric_names)
     row = "\t".join(str(values.get(col, "")) for col in header)
-    with open(tsv_path, "a", encoding="utf-8") as f:
-        f.write(row + "\n")
+    existing = tsv_path.read_text(encoding="utf-8")
+    _atomic_write(tsv_path, existing + row + "\n")
 
 
 def update_last_row(tsv_path: Path, updates: dict) -> None:
@@ -96,9 +96,15 @@ def update_last_row(tsv_path: Path, updates: dict) -> None:
 
 
 def best_composite(tsv_path: Path) -> float:
-    """Best composite score across all rows (0.0 if no data)."""
+    """Best confirmed composite (BASELINE/KEEP only; 0.0 if no data).
+
+    Candidate scores marked DISCARD or left incomplete must never become the
+    incumbent merely because their raw score was high.
+    """
     best = 0.0
     for row in read_rows(tsv_path):
+        if (row.get("decision") or "").strip() not in {"BASELINE", "KEEP"}:
+            continue
         try:
             best = max(best, float(row.get("composite_score") or 0.0))
         except (TypeError, ValueError):

@@ -61,7 +61,9 @@ class ModelClient:
     # Per-token pricing (USD) by provider/model prefix. Used for cost estimates
     # only. Longest prefix wins, so a specific entry (claude-sonnet-4-6)
     # shadows a broader one (claude-sonnet-4). Verified against provider
-    # pricing pages 2026-07-07 — review when a new model generation lands.
+    # pricing pages 2026-07-16 — review when a new model generation lands.
+    # Time-limited promotional discounts are deliberately excluded so cost
+    # guards remain conservative (for example, Sonnet 5's launch promotion).
     _PRICING = {
         # Gemini
         "gemini-3.5-flash": (1.50e-6, 9.00e-6),

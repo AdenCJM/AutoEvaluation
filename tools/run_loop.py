@@ -27,10 +27,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 import results_io
 from decision import decide
 from model_client import ModelClient
-from utils import DEFAULT_MODELS, PROJECT_ROOT, default_dimensions, load_config, sanitise_description, validate_config
+from run_state import atomic_write_text, read_state, run_lock, write_state
+from utils import (DEFAULT_MODELS, PROJECT_ROOT, default_dimensions, load_config,
+                   sanitise_description, split_prompt_sets, validate_config,
+                   validate_prompts)
 
 BEST_AGG_PATH = PROJECT_ROOT / "best_aggregate.json"
 BEST_HOLDOUT_AGG_PATH = PROJECT_ROOT / "best_holdout_aggregate.json"
+BASELINE_FINAL_TEST_AGG_PATH = PROJECT_ROOT / "baseline_final_test_aggregate.json"
+FINAL_TEST_AGG_PATH = PROJECT_ROOT / "final_test_aggregate.json"
+RECOVERY_DIR = PROJECT_ROOT / ".tmp" / "recovery"
 
 
 def get_next_run_id(results_tsv: Path) -> str:
@@ -152,6 +158,8 @@ def run_experiment(run_id: str, description: str = "", extra_args: list = None) 
            "--run-id", run_id, "--description", description]
     if extra_args:
         cmd += extra_args
+    if "--replace-run" not in cmd:
+        cmd.append("--replace-run")
     try:
         result = subprocess.run(
             cmd,
@@ -187,9 +195,75 @@ def run_holdout_check(run_id: str, cfg: dict) -> dict | None:
 def save_best_aggregates(train_agg: dict, holdout_agg: dict | None) -> None:
     """Persist the aggregates of the current best SKILL.md so future
     candidates can be compared with per-prompt pairing."""
-    BEST_AGG_PATH.write_text(json.dumps(train_agg, indent=2), encoding="utf-8")
+    atomic_write_text(BEST_AGG_PATH, json.dumps(train_agg, indent=2) + "\n")
     if holdout_agg is not None:
-        BEST_HOLDOUT_AGG_PATH.write_text(json.dumps(holdout_agg, indent=2), encoding="utf-8")
+        atomic_write_text(BEST_HOLDOUT_AGG_PATH, json.dumps(holdout_agg, indent=2) + "\n")
+
+
+def run_final_test(run_id: str, cfg: dict) -> dict | None:
+    """Evaluate the untouched final-test split without influencing decisions."""
+    if float(cfg.get("final_test_fraction", 0)) <= 0:
+        return None
+    if run_id == "final_test" and FINAL_TEST_AGG_PATH.exists():
+        return json.loads(FINAL_TEST_AGG_PATH.read_text(encoding="utf-8"))
+    return run_experiment(
+        run_id, "Untouched final-test evaluation",
+        extra_args=["--no-tsv", "--prompt-set", "final_test"],
+    )
+
+
+def recover_incomplete_run(skill_path: Path, skill_best: Path, results_tsv: Path) -> None:
+    """Restore the confirmed best after a crash mid-iteration."""
+    state = read_state()
+    if state.get("phase") not in {"modifying", "evaluating", "deciding", "promoting", "baseline"}:
+        return
+    run_id = state.get("run_id")
+    if state.get("phase") == "baseline":
+        if skill_best.exists():
+            atomic_write_text(skill_path, skill_best.read_text(encoding="utf-8"))
+        for path in (
+            results_tsv, skill_best, BEST_AGG_PATH, BEST_HOLDOUT_AGG_PATH,
+            BASELINE_FINAL_TEST_AGG_PATH, FINAL_TEST_AGG_PATH,
+        ):
+            path.unlink(missing_ok=True)
+        write_state("idle", recovered_from="baseline", recovered_run_id=run_id)
+        print("Recovered interrupted baseline; restarting it from clean state.")
+        return
+    snapshot = RECOVERY_DIR / str(run_id)
+    for source_name, destination in (
+        ("SKILL.md.best", skill_best),
+        ("best_aggregate.json", BEST_AGG_PATH),
+        ("best_holdout_aggregate.json", BEST_HOLDOUT_AGG_PATH),
+    ):
+        source = snapshot / source_name
+        if source.exists():
+            atomic_write_text(destination, source.read_text(encoding="utf-8"))
+    if skill_best.exists():
+        atomic_write_text(skill_path, skill_best.read_text(encoding="utf-8"))
+    rows = results_io.read_rows(results_tsv)
+    if rows and run_id and rows[-1].get("run_id") == run_id:
+        decision = (rows[-1].get("decision") or "").strip()
+        if decision in {"", "KEEP"}:
+            results_io.update_last_row(results_tsv, {"decision": "DISCARD"})
+    if snapshot.exists():
+        shutil.rmtree(snapshot)
+    write_state("idle", recovered_from=state.get("phase"), recovered_run_id=run_id)
+    print(f"Recovered interrupted run {run_id or '(unknown)'}; restored SKILL.md.best.")
+
+
+def create_recovery_snapshot(run_id: str, skill_best: Path) -> None:
+    """Snapshot the incumbent so a partial promotion can be rolled back."""
+    snapshot = RECOVERY_DIR / run_id
+    snapshot.mkdir(parents=True, exist_ok=True)
+    for source in (skill_best, BEST_AGG_PATH, BEST_HOLDOUT_AGG_PATH):
+        if source.exists():
+            atomic_write_text(snapshot / source.name, source.read_text(encoding="utf-8"))
+
+
+def clear_recovery_snapshot(run_id: str) -> None:
+    snapshot = RECOVERY_DIR / run_id
+    if snapshot.exists():
+        shutil.rmtree(snapshot)
 
 
 def load_best_aggregate(path: Path, results_tsv: Path) -> dict | None:
@@ -344,7 +418,7 @@ Analyse the weakest metrics and the concrete failures in the sample outputs. Hyp
         new_skill = skill_match.group(1).strip()
 
     if new_skill and _check_skill_completeness(current_skill, new_skill):
-        skill_path.write_text(new_skill, encoding="utf-8")
+        atomic_write_text(skill_path, new_skill + "\n")
     elif new_skill:
         print(f"Warning: LLM returned incomplete/corrupted skill ({len(new_skill)} chars), skipping write", file=sys.stderr)
 
@@ -381,12 +455,12 @@ def _write_status(
         "start_time_iso": datetime.fromtimestamp(start_time).isoformat(),
         "avg_iteration_seconds": round(avg_secs, 1),
         "eta_seconds": round(eta_seconds),
-        "cost_usd": round(client.estimated_cost_usd, 4),
+        "cost_usd": round(get_total_cost(client), 4),
         "last_updated_iso": datetime.now().isoformat(),
         "current_run_id": run_id,
     }
     status_path = PROJECT_ROOT / ".tmp" / "run_status.json"
-    status_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    atomic_write_text(status_path, json.dumps(payload, indent=2) + "\n")
 
 
 def _get_skill_name(skill_best: Path) -> str | None:
@@ -406,7 +480,7 @@ def _get_skill_name(skill_best: Path) -> str | None:
     return None
 
 
-def print_run_summary(results_tsv: Path, start_time: float, client, iterations_run: int):
+def print_run_summary(results_tsv: Path, start_time: float, client, iterations_run: int, final_test: dict | None = None):
     """Print an end-of-run summary and write .tmp/run-summary.md."""
     elapsed = time.time() - start_time
     elapsed_h = int(elapsed // 3600)
@@ -414,7 +488,7 @@ def print_run_summary(results_tsv: Path, start_time: float, client, iterations_r
     elapsed_s = int(elapsed % 60)
     elapsed_str = f"{elapsed_h}h {elapsed_m}m {elapsed_s}s" if elapsed_h else f"{elapsed_m}m {elapsed_s}s"
 
-    usage = client.usage_summary()
+    usage = aggregate_token_usage()
     best_score = get_best_score(results_tsv)
 
     # Parse results for baseline score and kept changes
@@ -449,9 +523,28 @@ def print_run_summary(results_tsv: Path, start_time: float, client, iterations_r
         f"  Best score:       {best_score:.4f}  ({improvement_str})",
         "",
     ]
+    if usage["unknown_models"]:
+        output_lines.insert(
+            8,
+            "  Cost warning:     incomplete; unpriced " + ", ".join(usage["unknown_models"]),
+        )
     if kept_changes:
         output_lines.append(f"  Kept changes ({len(kept_changes)}):")
         output_lines.extend(kept_changes)
+        output_lines.append("")
+    if final_test:
+        baseline_final = None
+        if BASELINE_FINAL_TEST_AGG_PATH.exists():
+            baseline_final = json.loads(BASELINE_FINAL_TEST_AGG_PATH.read_text(encoding="utf-8"))
+        final_delta = (
+            final_test["composite_score"] - baseline_final["composite_score"]
+            if baseline_final else None
+        )
+        delta_text = f", delta {final_delta:+.4f}" if final_delta is not None else ""
+        output_lines.append(
+            f"  Final-test score:  {final_test['composite_score']:.4f} "
+            f"(never used for KEEP/DISCARD{delta_text})"
+        )
         output_lines.append("")
     skill_best = PROJECT_ROOT / "SKILL.md.best"
     skill_name = _get_skill_name(skill_best)
@@ -501,6 +594,23 @@ def print_run_summary(results_tsv: Path, start_time: float, client, iterations_r
         for c in kept_changes:
             md_lines.append(c.strip().replace("·", "-"))
         md_lines.append("")
+    if final_test:
+        baseline_final_score = None
+        if BASELINE_FINAL_TEST_AGG_PATH.exists():
+            baseline_final_score = json.loads(
+                BASELINE_FINAL_TEST_AGG_PATH.read_text(encoding="utf-8")
+            )["composite_score"]
+        md_lines += [
+            "## Untouched Final Test",
+            "",
+            f"- Baseline: {baseline_final_score:.4f}" if baseline_final_score is not None else "- Baseline: unavailable",
+            f"- Best skill: {final_test['composite_score']:.4f}",
+            (
+                f"- Delta: {final_test['composite_score'] - baseline_final_score:+.4f}"
+                if baseline_final_score is not None else "- Delta: unavailable"
+            ),
+            "",
+        ]
     md_lines.append("Best skill file: `SKILL.md.best`")
     if skill_name:
         global_skill = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
@@ -509,18 +619,17 @@ def print_run_summary(results_tsv: Path, start_time: float, client, iterations_r
         else:
             md_lines.append(f"\nTo install: `mkdir -p ~/.claude/skills/{skill_name} && cp SKILL.md.best ~/.claude/skills/{skill_name}/SKILL.md`")
 
-    (PROJECT_ROOT / ".tmp" / "run-summary.md").write_text(
-        "\n".join(md_lines), encoding="utf-8"
-    )
+    atomic_write_text(PROJECT_ROOT / ".tmp" / "run-summary.md", "\n".join(md_lines))
     print(f"  Summary written to .tmp/run-summary.md\n")
 
 
-def aggregate_token_usage() -> tuple[int, int]:
-    """Read all per-process token usage logs and return (total_input, total_output)."""
-    total_in, total_out = 0, 0
+def aggregate_token_usage() -> dict:
+    """Price every logged call with the model that actually served it."""
+    by_model: dict[str, dict[str, int]] = {}
     log_dir = PROJECT_ROOT / ".tmp"
     if not log_dir.exists():
-        return total_in, total_out
+        return {"input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0,
+                "by_model": {}, "unknown_models": []}
     for log_file in log_dir.glob("token_usage_*.jsonl"):
         try:
             for line in log_file.read_text(encoding="utf-8").strip().split("\n"):
@@ -528,26 +637,36 @@ def aggregate_token_usage() -> tuple[int, int]:
                     continue
                 try:
                     entry = json.loads(line)
-                    total_in += entry.get("input", 0)
-                    total_out += entry.get("output", 0)
+                    model = entry.get("model") or "unknown"
+                    bucket = by_model.setdefault(model, {"input": 0, "output": 0})
+                    bucket["input"] += int(entry.get("input", 0) or 0)
+                    bucket["output"] += int(entry.get("output", 0) or 0)
                 except json.JSONDecodeError:
                     continue
         except OSError:
             continue
-    return total_in, total_out
+    total_in = sum(v["input"] for v in by_model.values())
+    total_out = sum(v["output"] for v in by_model.values())
+    total_cost = 0.0
+    unknown = []
+    for model, usage in by_model.items():
+        pricing = ModelClient.price_for_model(model)
+        if pricing is None:
+            unknown.append(model)
+            continue
+        total_cost += usage["input"] * pricing[0] + usage["output"] * pricing[1]
+    return {
+        "input_tokens": total_in,
+        "output_tokens": total_out,
+        "estimated_cost_usd": round(total_cost, 6),
+        "by_model": by_model,
+        "unknown_models": sorted(unknown),
+    }
 
 
 def get_total_cost(client: ModelClient) -> float:
-    """Get total estimated cost across all processes (modifier + subprocesses)."""
-    sub_in, sub_out = aggregate_token_usage()
-    # Combine subprocess tokens with the modifier client's own tokens
-    total_in = client.total_input_tokens + sub_in
-    total_out = client.total_output_tokens + sub_out
-    pricing = client.price_for_model(client.model)
-    if pricing is None:
-        return 0.0
-    input_price, output_price = pricing
-    return total_in * input_price + total_out * output_price
+    """Return cross-process cost without double-counting the parent client."""
+    return float(aggregate_token_usage()["estimated_cost_usd"])
 
 
 def _default_dimensions():
@@ -601,19 +720,24 @@ def _quick_start_config(args) -> dict:
         "accept_confidence": 0.95,
         "min_valid_sample_frac": 0.8,
         "holdout_fraction": 0.3,
+        "final_test_fraction": 0.2,
+        "sequential_correction": True,
         "llm_judge_dimensions": _default_dimensions(),
         "deterministic_metrics": [],
     }
 
     import yaml
     cfg_path = PROJECT_ROOT / "config.yaml"
-    cfg_path.write_text(yaml.dump(cfg, default_flow_style=False, sort_keys=False), encoding="utf-8")
+    atomic_write_text(
+        cfg_path,
+        yaml.dump(cfg, default_flow_style=False, sort_keys=False),
+    )
     print(f"Generated config.yaml from CLI flags")
 
     return cfg
 
 
-def main():
+def _main():
     parser = argparse.ArgumentParser(
         description="Run the optimisation loop",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -635,6 +759,8 @@ With existing config:
     parser.add_argument("--prompts", type=str, help="Path to prompts JSON file (default: prompts/prompts.json)")
     parser.add_argument("--measure-noise", type=int, default=0, metavar="N",
                         help="Evaluate the current SKILL.md N times with no edits and report the score noise floor, then exit")
+    parser.add_argument("--skip-final-test", action="store_true",
+                        help="Leave the final-test split untouched for a later campaign-finalising run")
     args = parser.parse_args()
 
     # Quick-start mode: --skill and --provider given, no config.yaml needed
@@ -658,19 +784,51 @@ With existing config:
     skill_best = PROJECT_ROOT / "SKILL.md.best"
     results_tsv = PROJECT_ROOT / cfg.get("results_tsv", "results.tsv")
 
+    prompts = json.loads((PROJECT_ROOT / cfg.get("prompts_path", "prompts/prompts.json")).read_text(encoding="utf-8"))
+    validate_prompts(prompts)
+    train_prompts, validation_prompts, final_prompts = split_prompt_sets(
+        prompts,
+        float(cfg.get("holdout_fraction", 0.3)),
+        float(cfg.get("final_test_fraction", 0.0)),
+    )
+    print(
+        f"Prompt split: {len(train_prompts)} train / {len(validation_prompts)} validation / "
+        f"{len(final_prompts)} final test"
+    )
+    if cfg.get("accept_rule", "paired") == "paired" and len(train_prompts) < 8:
+        print(
+            "WARNING: fewer than 8 training prompts; decisions will use degraded threshold mode, "
+            "not a bootstrap significance claim.",
+            file=sys.stderr,
+        )
+
+    if FINAL_TEST_AGG_PATH.exists() and results_tsv.exists():
+        print(
+            "Error: this campaign has already consumed its untouched final-test split. "
+            "Start a fresh campaign with new final-test prompts before further optimisation.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     max_iterations = args.iterations or cfg.get("max_iterations", 0)
     max_hours = args.hours or cfg.get("max_hours", 0)
     max_cost_usd = cfg.get("max_cost_usd", 0)
     convergence_window = cfg.get("convergence_window", 0)
 
-    # Cost-cap sanity: an unknown model prices at $0, so the cap can't fire
-    if max_cost_usd and not client.pricing_known:
+    # Cost-cap sanity: every configured serving model needs a pricing entry.
+    configured_models = {cfg.get("model"), cfg.get("judge_model", cfg.get("model"))}
+    unknown_pricing = sorted(
+        model for model in configured_models
+        if model and ModelClient.price_for_model(model) is None
+    )
+    if max_cost_usd and unknown_pricing:
         print(
-            f"WARNING: max_cost_usd is set but there is no pricing entry for "
-            f"'{client.model}' — the cost cap CANNOT trigger. Add the model to "
-            f"ModelClient._PRICING or remove max_cost_usd.",
+            f"Error: max_cost_usd is set but pricing is missing for "
+            f"{', '.join(unknown_pricing)}. Those calls cannot be counted, so the "
+            f"cap cannot be enforced until ModelClient._PRICING is updated.",
             file=sys.stderr,
         )
+        sys.exit(1)
 
     # Self-judge warning
     if not cfg.get("judge_provider") and not cfg.get("judge_model"):
@@ -682,24 +840,36 @@ With existing config:
     consecutive_discards = 0
     consecutive_failures = 0
     iterations_since_improvement = 0
+    iteration_costs = []
+    campaign_complete = True
 
     # Clear stale token usage logs from prior runs
     for old_log in (PROJECT_ROOT / ".tmp").glob("token_usage_*.jsonl"):
         old_log.unlink(missing_ok=True)
 
+    recover_incomplete_run(skill_path, skill_best, results_tsv)
+
     # Baseline if needed (train set + holdout set, so future candidates have
     # per-prompt aggregates to pair against)
     if not results_tsv.exists() or len(results_tsv.read_text(encoding="utf-8").strip().split("\n")) <= 1:
         print("Running baseline experiment...")
+        write_state("baseline", run_id="baseline")
         base_agg = run_experiment("baseline", "Initial baseline")
         if base_agg is None:
             print("Baseline experiment failed — cannot start the loop.", file=sys.stderr)
             sys.exit(1)
-        shutil.copy2(skill_path, skill_best)
+        atomic_write_text(skill_best, skill_path.read_text(encoding="utf-8"))
         base_holdout = run_holdout_check("baseline", cfg)
         save_best_aggregates(base_agg, base_holdout)
         update_decision(results_tsv, "BASELINE",
                         base_holdout["composite_score"] if base_holdout else None)
+        base_final = run_final_test("baseline_final_test", cfg)
+        if base_final:
+            atomic_write_text(
+                BASELINE_FINAL_TEST_AGG_PATH,
+                json.dumps(base_final, indent=2) + "\n",
+            )
+        write_state("idle", run_id="baseline")
 
     while True:
         iteration += 1
@@ -715,8 +885,16 @@ With existing config:
                 print(f"\nReached max hours ({max_hours}h). Stopping.")
                 break
         total_cost = get_total_cost(client)
+        projected_cost = (sum(iteration_costs) / len(iteration_costs)) if iteration_costs else 0.0
         if max_cost_usd and total_cost >= max_cost_usd:
             print(f"\nReached cost cap (${total_cost:.2f} >= ${max_cost_usd:.2f}). Stopping.")
+            break
+        if max_cost_usd and projected_cost and total_cost + projected_cost > max_cost_usd:
+            print(
+                f"\nStopping before the next iteration: projected cost "
+                f"${total_cost + projected_cost:.2f} would exceed the "
+                f"${max_cost_usd:.2f} cap."
+            )
             break
         if convergence_window and iterations_since_improvement >= convergence_window:
             print(f"\nConverged — no improvement in {convergence_window} iterations. Stopping.")
@@ -733,6 +911,10 @@ With existing config:
         # Get latest run_id for enriched context
         latest_run_id = get_latest_run_id(results_tsv)
 
+        run_id = get_next_run_id(results_tsv)
+        create_recovery_snapshot(run_id, skill_best)
+        write_state("modifying", run_id=run_id)
+
         # Analyse and modify
         force_radical = consecutive_discards >= 5
         if force_radical:
@@ -745,32 +927,40 @@ With existing config:
         print(f"Change: {description}")
 
         # Snapshot SKILL.md before evaluation
-        run_id = get_next_run_id(results_tsv)
         skills_dir = PROJECT_ROOT / ".tmp" / "skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(skill_path, skills_dir / f"{run_id}.md")
 
         print(f"Running experiment {run_id}...")
+        write_state("evaluating", run_id=run_id)
         agg = run_experiment(run_id, description)
 
         if agg is None:
             consecutive_failures += 1
-            shutil.copy2(skill_best, skill_path)
+            atomic_write_text(skill_path, skill_best.read_text(encoding="utf-8"))
+            write_state("idle", run_id=run_id, decision="ERROR")
+            clear_recovery_snapshot(run_id)
             if consecutive_failures >= 3:
                 print("3 consecutive experiment failures — aborting run. "
                       "Fix the eval pipeline (API key? judge model?) and re-run to resume.",
                       file=sys.stderr)
+                campaign_complete = False
                 break
             print(f"Experiment failed ({consecutive_failures}/3), retrying...")
             continue
         consecutive_failures = 0
 
         new_score = agg["composite_score"]
+        write_state("deciding", run_id=run_id)
 
         # Decide: paired per-prompt comparison against the persisted best
         # aggregate (falls back to the simple threshold rule when per-prompt
         # data is unavailable, e.g. resuming a pre-July-2026 run)
         best_agg = load_best_aggregate(BEST_AGG_PATH, results_tsv)
+        cfg["_decision_index"] = sum(
+            1 for row in results_io.read_rows(results_tsv)
+            if (row.get("run_id") or "") != "baseline"
+        )
         verdict = decide(agg, best_agg, cfg)
         keep, reason = verdict["keep"], verdict["reason"]
         print(f"Decision ({verdict['method']}): {reason}")
@@ -794,17 +984,21 @@ With existing config:
 
         if keep:
             print(f"KEEP — {best_score:.4f} → {new_score:.4f} ({reason})")
-            shutil.copy2(skill_path, skill_best)
+            write_state("promoting", run_id=run_id)
+            atomic_write_text(skill_best, skill_path.read_text(encoding="utf-8"))
             save_best_aggregates(agg, holdout_agg)
             update_decision(results_tsv, "KEEP", holdout_score)
             consecutive_discards = 0
             iterations_since_improvement = 0
         else:
             print(f"DISCARD — {reason}")
-            shutil.copy2(skill_best, skill_path)
+            atomic_write_text(skill_path, skill_best.read_text(encoding="utf-8"))
             update_decision(results_tsv, "DISCARD", holdout_score)
             consecutive_discards += 1
             iterations_since_improvement += 1
+
+        write_state("idle", run_id=run_id, decision="KEEP" if keep else "DISCARD")
+        clear_recovery_snapshot(run_id)
 
         if consecutive_discards >= 5:
             print("5 consecutive discards detected — next iteration will use radical approach.")
@@ -818,6 +1012,7 @@ With existing config:
         remaining = max_iterations - iteration if max_iterations else 0
         eta_m = int(avg_secs * remaining / 60) if remaining > 0 else 0
         cost = get_total_cost(client)
+        iteration_costs.append(max(0.0, cost - total_cost))
 
         eta_str = f"~{eta_m} min remaining · " if max_iterations and remaining > 0 else ""
         print(f"\n  {run_id} completed in {iter_m}m {iter_s}s")
@@ -825,8 +1020,21 @@ With existing config:
 
         _write_status("running", run_id, iteration, max_iterations, start_time, iter_times, client)
 
+    final_test = None if args.skip_final_test or not campaign_complete else run_final_test("final_test", cfg)
+    if final_test:
+        atomic_write_text(FINAL_TEST_AGG_PATH, json.dumps(final_test, indent=2) + "\n")
     _write_status("complete", "", iteration - 1, max_iterations, start_time, iter_times, client)
-    print_run_summary(results_tsv, start_time, client, iteration - 1)
+    write_state("complete", iterations=iteration - 1)
+    print_run_summary(results_tsv, start_time, client, iteration - 1, final_test=final_test)
+
+
+def main():
+    try:
+        with run_lock():
+            _main()
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

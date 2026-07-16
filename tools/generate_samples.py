@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from model_client import ModelClient
-from utils import PROJECT_ROOT, load_config, split_prompts
+from utils import PROJECT_ROOT, load_config, split_prompt_sets, validate_prompts
 
 
 def _generate_one(client: ModelClient, skill_content: str, prompt_data: dict, index: int, out_dir: Path, sample_name: str, replicate: int = 0) -> dict:
@@ -72,6 +72,7 @@ def generate_samples(
     replicates: int = 1,
     prompt_set: str = "all",
     holdout_fraction: float = 0.0,
+    final_test_fraction: float = 0.0,
 ) -> dict:
     """Generate samples and save to output directory.
 
@@ -84,9 +85,12 @@ def generate_samples(
 
     skill_content = Path(skill_path).read_text(encoding="utf-8")
     prompts = json.loads(Path(prompts_path).read_text(encoding="utf-8"))
-    if prompt_set in ("train", "holdout"):
-        train, holdout = split_prompts(prompts, holdout_fraction)
-        prompts = train if prompt_set == "train" else holdout
+    validate_prompts(prompts)
+    if prompt_set in ("train", "holdout", "final_test"):
+        train, holdout, final_test = split_prompt_sets(
+            prompts, holdout_fraction, final_test_fraction
+        )
+        prompts = {"train": train, "holdout": holdout, "final_test": final_test}[prompt_set]
         if not prompts:
             print(f"Error: prompt set '{prompt_set}' is empty (holdout_fraction={holdout_fraction})", file=sys.stderr)
             sys.exit(1)
@@ -166,7 +170,7 @@ def main():
     parser.add_argument("--max-concurrent", type=int, default=cfg.get("max_concurrent", 1))
     parser.add_argument("--replicates", type=int, default=cfg.get("replicates_per_prompt", 1),
                         help="Completions per prompt (default: config replicates_per_prompt)")
-    parser.add_argument("--prompt-set", choices=["all", "train", "holdout"], default="all",
+    parser.add_argument("--prompt-set", choices=["all", "train", "holdout", "final_test"], default="all",
                         help="Which prompt split to generate for")
     args = parser.parse_args()
 
@@ -182,6 +186,7 @@ def main():
         replicates=args.replicates,
         prompt_set=args.prompt_set,
         holdout_fraction=float(cfg.get("holdout_fraction", 0.3)),
+        final_test_fraction=float(cfg.get("final_test_fraction", 0.0)),
     )
 
 

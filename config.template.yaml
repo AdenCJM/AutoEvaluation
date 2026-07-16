@@ -8,8 +8,8 @@
 #   gemini:    gemini-3.5-flash   (balanced) | gemini-3.1-flash-lite (cheap)
 #   openai:    gpt-5.4            (balanced) | gpt-5.4-mini (cheap)
 #   anthropic: claude-sonnet-5    (balanced) | claude-opus-4-8 (max quality) | claude-haiku-4-5 (cheap)
-# Model lines turn over fast — if cost tracking warns about unknown pricing,
-# update the model here and the pricing table in tools/model_client.py.
+# Model lines turn over fast — unknown pricing disables estimates, and a
+# configured cost cap refuses to start until tools/model_client.py is updated.
 provider: gemini
 model: gemini-3.5-flash
 api_key_env: GEMINI_API_KEY   # name of the env var in .env holding your API key
@@ -45,6 +45,8 @@ accept_confidence: 0.95    # confidence level for the paired accept rule
 min_valid_sample_frac: 0.8 # abort scoring if fewer than this fraction of samples judged OK
 holdout_fraction: 0.3      # fraction of prompts reserved for validating KEEPs (0 = disabled)
                            # Prompts can also carry an explicit "split": "holdout" in prompts.json
+final_test_fraction: 0.2   # untouched prompts scored at baseline and once at the end
+sequential_correction: true # alpha spending controls false positives across resumed/repeated tests
 min_improvement: 0.01      # only used by accept_rule: simple — run
                            # `python3 tools/run_loop.py --measure-noise 3` to size it
 
@@ -54,9 +56,8 @@ min_improvement: 0.01      # only used by accept_rule: simple — run
 # Set to 0 or omit to run indefinitely (until manually stopped).
 max_iterations: 0     # stop after N experiments (0 = unlimited)
 max_hours: 0          # stop after N hours (0 = unlimited, accepts decimals e.g. 1.5)
-max_cost_usd: 0       # stop after estimated spend exceeds this (0 = unlimited)
-                      # NOTE: only works when the model has a pricing entry in
-                      # tools/model_client.py — the loop warns at startup if not
+max_cost_usd: 0       # projected hard guard (0 = unlimited); requires known
+                      # pricing for both primary and judge models
 convergence_window: 0 # stop after N iterations with no improvement (0 = disabled)
 
 # --- Performance ---

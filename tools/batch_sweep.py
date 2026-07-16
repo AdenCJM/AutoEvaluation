@@ -23,6 +23,7 @@ format, so score_aggregator and decision.py work on the result unchanged.
 
 import argparse
 import json
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -32,7 +33,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from eval_llm_judge import build_judge_prompt, build_judge_schema
 from model_client import ModelClient
 from score_aggregator import aggregate
-from utils import PROJECT_ROOT, load_config, load_env, split_prompts, validate_config
+from utils import (
+    PROJECT_ROOT,
+    load_config,
+    load_env,
+    split_prompt_sets,
+    validate_config,
+    validate_prompts,
+)
 
 POLL_INTERVAL_SECONDS = 30
 GEN_PREFIX = "gen__"
@@ -210,13 +218,17 @@ def main():
     parser = argparse.ArgumentParser(description="Batch regression sweep via the Anthropic Batches API")
     parser.add_argument("--skill", default=None,
                         help="Skill file to score (default: SKILL.md.best if present, else config skill_path)")
-    parser.add_argument("--prompt-set", choices=["all", "train", "holdout"], default="all")
+    parser.add_argument(
+        "--prompt-set", choices=["all", "train", "holdout", "final_test"], default="all"
+    )
     parser.add_argument("--replicates", type=int, default=None,
                         help="Completions per prompt (default: config replicates_per_prompt)")
     parser.add_argument("--run-id", default=None, help="Default: sweep_YYYYMMDD_HHMM")
     parser.add_argument("--timeout-hours", type=float, default=2.0)
     parser.add_argument("--compare-best", action="store_true",
                         help="Print a non-regression verdict against best_aggregate.json")
+    parser.add_argument("--replace-run", action="store_true",
+                        help="Explicitly replace existing output for this run id")
     args = parser.parse_args()
 
     cfg = validate_config(load_config())
@@ -234,14 +246,31 @@ def main():
     skill_content = skill_path.read_text(encoding="utf-8")
 
     prompts = json.loads((PROJECT_ROOT / cfg.get("prompts_path", "prompts/prompts.json")).read_text(encoding="utf-8"))
-    if args.prompt_set in ("train", "holdout"):
-        train, holdout = split_prompts(prompts, float(cfg.get("holdout_fraction", 0.3)))
-        prompts = train if args.prompt_set == "train" else holdout
+    validate_prompts(prompts)
+    if args.prompt_set != "all":
+        prompt_sets = split_prompt_sets(
+            prompts,
+            float(cfg.get("holdout_fraction", 0.3)),
+            float(cfg.get("final_test_fraction", 0.0)),
+        )
+        prompts = prompt_sets[args.prompt_set]
     if not prompts:
         print(f"Error: prompt set '{args.prompt_set}' is empty", file=sys.stderr)
         sys.exit(1)
 
     run_id = args.run_id or f"sweep_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
+    samples_dir = PROJECT_ROOT / ".tmp" / "samples" / run_id
+    evals_dir = PROJECT_ROOT / ".tmp" / "evals" / run_id
+    existing = [path for path in (samples_dir, evals_dir) if path.exists()]
+    if existing and not args.replace_run:
+        print(
+            f"Error: run id {run_id!r} already has output; choose a new id or "
+            "pass --replace-run for an interrupted sweep.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    for path in existing:
+        shutil.rmtree(path)
     model = cfg["model"]
     judge_model = cfg.get("judge_model", model)
     dimensions = cfg["llm_judge_dimensions"]
@@ -259,7 +288,6 @@ def main():
         print("Error: no samples generated", file=sys.stderr)
         sys.exit(1)
 
-    samples_dir = PROJECT_ROOT / ".tmp" / "samples" / run_id
     samples_dir.mkdir(parents=True, exist_ok=True)
     samples = {}
     for custom_id, text in gen_outputs.items():
@@ -272,7 +300,6 @@ def main():
     judge_requests = build_judge_requests(samples, dimensions, judge_model, skill_content=judge_skill)
     judge_outputs = run_batch(client, judge_requests, "judge", args.timeout_hours)
 
-    evals_dir = PROJECT_ROOT / ".tmp" / "evals" / run_id
     evals_dir.mkdir(parents=True, exist_ok=True)
     for sample_id in samples:
         raw = judge_outputs.get(f"{JUDGE_PREFIX}{sample_id}")

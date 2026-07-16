@@ -88,7 +88,7 @@ cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
 This gives you:
 - **SKILL.md** — the writing style guide you'll optimise
 - **config.yaml** — settings (model, evaluation rubric, iteration limits)
-- **prompts.json** — 5 test scenarios (writing tasks the system will evaluate)
+- **prompts.json** — 30 diverse scenarios split across training, validation, and untouched final testing
 - **eval_deterministic.py** — rule-based evaluation metrics (e.g., checking for banned words)
 
 Let's verify they're in place:
@@ -280,7 +280,7 @@ Open `config.yaml` and try:
 - **`replicates_per_prompt: 3`** — completions per prompt per experiment, so KEEP/DISCARD decisions account for score variance
 - **`convergence_window: 10`** — stop after 10 iterations with no improvement (saves API cost)
 
-See the [Configuration Guide](docs/CONFIG_REFERENCE.md) for details.
+See the [Configuration Guide](CONFIG_REFERENCE.md) for details.
 
 ### Watch the Dashboard (Optional)
 
@@ -300,9 +300,9 @@ If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) instal
 /autoeval
 ```
 
-This walks through three phases: conversational setup, a live dashboard, then autopilot. The skill follows the same loop spec defined in `program.md`, modifies `SKILL.md`, tracks results, and reports progress after every experiment.
+This walks through conversational setup, a live dashboard, then the crash-safe headless driver. `program.md` is the runbook; `tools/run_loop.py` owns all state transitions.
 
-See [Troubleshooting](docs/TROUBLESHOOTING.md) if the skill isn't picked up.
+See [Troubleshooting](TROUBLESHOOTING.md) if the skill isn't picked up.
 
 ---
 
@@ -321,8 +321,8 @@ You now have:
 
 - **Keep optimising** → Run more iterations until the score plateaus
 - **Switch to your own skill** → Repeat with your own instructions
-- **Read the architecture** → See [Architecture & Design](docs/ARCHITECTURE.md) to understand why things work this way
-- **Troubleshoot issues** → Check [Troubleshooting Guide](docs/TROUBLESHOOTING.md) if something breaks
+- **Read the architecture** → See [Architecture & Design](ARCHITECTURE.md) to understand why things work this way
+- **Troubleshoot issues** → Check [Troubleshooting Guide](TROUBLESHOOTING.md) if something breaks
 - **Explore advanced features** → See README.md for parallel execution, custom metrics, GitHub Actions, etc.
 
 Good luck! 🚀

@@ -1,52 +1,52 @@
 [
   {
-    "id": "email_internal",
-    "genre": "internal email",
-    "prompt": "Write a 400-500 word email to the engineering team explaining why the product launch is being delayed by two weeks and what the revised timeline looks like."
+    "id": "task_1",
+    "genre": "general",
+    "prompt": "Write a short paragraph explaining what you do and why it matters."
   },
   {
-    "id": "blog_technical",
-    "genre": "technical blog post",
-    "prompt": "Write a 400-500 word blog post explaining how API rate limiting works and why it matters for application reliability."
+    "id": "task_2",
+    "genre": "general",
+    "prompt": "Write a brief email to a colleague summarising the key takeaways from a meeting."
   },
   {
-    "id": "slack_update",
-    "genre": "Slack message",
-    "prompt": "Write a 150-200 word Slack message updating the team on a project that hit a major blocker this week, what you tried, and what the plan is now."
+    "id": "task_3",
+    "genre": "general",
+    "prompt": "Draft a one-paragraph product description for a new feature aimed at technical users."
   },
   {
-    "id": "report_exec",
-    "genre": "executive summary",
-    "prompt": "Write a 400-500 word executive summary of a quarterly review for a B2B SaaS company that grew revenue 15% but saw churn increase."
+    "id": "task_4",
+    "genre": "general",
+    "prompt": "Write a short Slack message to your team announcing a timeline change."
   },
   {
-    "id": "proposal_brief",
-    "genre": "project proposal",
-    "prompt": "Write a 400-500 word proposal for building an internal tool that automates weekly reporting from three data sources into a single dashboard."
+    "id": "task_5",
+    "genre": "general",
+    "prompt": "Write a two-paragraph blog post intro about how your team solved a recent challenge."
   },
-  {
-    "id": "explainer_nontechnical",
-    "genre": "non-technical explainer",
-    "prompt": "Write a 400-500 word explanation of blockchain for someone who has never heard of it, aimed at a general business audience."
-  },
-  {
-    "id": "opinion_piece",
-    "genre": "opinion/argument",
-    "prompt": "Write a 400-500 word argument for why remote work is better than hybrid for knowledge workers. Take a clear position."
-  },
-  {
-    "id": "incident_postmortem",
-    "genre": "incident report",
-    "prompt": "Write a 400-500 word post-mortem for a production outage caused by a database migration that took the site down for 45 minutes."
-  },
-  {
-    "id": "newsletter_intro",
-    "genre": "newsletter",
-    "prompt": "Write a 300-400 word introduction to a company newsletter covering three topics: a new product feature, a team offsite, and an upcoming industry conference."
-  },
-  {
-    "id": "documentation_howto",
-    "genre": "technical documentation",
-    "prompt": "Write a 400-500 word how-to guide for setting up a new development environment, including prerequisites, installation steps, and verification."
-  }
+  {"id": "task_6", "genre": "formal email", "prompt": "Write a formal email explaining a missed deadline and the recovery plan."},
+  {"id": "task_7", "genre": "customer support", "prompt": "Reply to a frustrated customer whose issue has recurred twice."},
+  {"id": "task_8", "genre": "technical explanation", "prompt": "Explain rate limiting to a junior developer with one concrete example."},
+  {"id": "task_9", "genre": "executive summary", "prompt": "Summarise a quarter where revenue rose but customer churn also increased."},
+  {"id": "task_10", "genre": "documentation", "prompt": "Write setup instructions for a command-line tool, including verification and rollback."},
+  {"id": "task_11", "genre": "proposal", "prompt": "Propose a small internal automation project, including scope, risks, and success measures."},
+  {"id": "task_12", "genre": "incident report", "prompt": "Write a concise post-incident summary for a 45-minute production outage."},
+  {"id": "task_13", "genre": "marketing", "prompt": "Describe a developer feature without hype or unsupported claims."},
+  {"id": "task_14", "genre": "opinion", "prompt": "Argue for or against four-day work weeks and acknowledge the strongest counterargument."},
+  {"id": "task_15", "genre": "editing", "prompt": "Rewrite this sentence plainly: 'We leveraged cross-functional synergies to operationalise strategic outcomes.'"},
+  {"id": "task_16", "genre": "announcement", "prompt": "Announce a pricing change while explaining who is affected and when."},
+  {"id": "task_17", "genre": "feedback", "prompt": "Give kind but direct feedback to a colleague whose reports are consistently late."},
+  {"id": "task_18", "genre": "meeting notes", "prompt": "Turn messy meeting notes into decisions, owners, and open questions."},
+  {"id": "task_19", "genre": "tutorial", "prompt": "Teach a beginner how to diagnose a failed deployment without assuming specialist knowledge."},
+  {"id": "task_20", "genre": "comparison", "prompt": "Compare two project management approaches in a compact table and recommendation."},
+  {"id": "task_21", "genre": "sensitive communication", "prompt": "Tell a team that a planned project has been cancelled without blaming individuals."},
+  {"id": "task_22", "genre": "long-form", "prompt": "Write a structured 600-word article about why observability matters in distributed systems."},
+  {"id": "task_23", "genre": "short-form", "prompt": "Explain a two-week delay in no more than 40 words."},
+  {"id": "task_24", "genre": "creative", "prompt": "Write a short opening scene in which two engineers discover an unexpected system behaviour."},
+  {"id": "task_25", "genre": "data commentary", "prompt": "Explain a chart showing sales up 12%, margin down 4%, and returns up 9%."},
+  {"id": "task_26", "genre": "FAQ", "prompt": "Write five concise FAQ answers for a beta feature with known limitations."},
+  {"id": "task_27", "genre": "boundary", "prompt": "Respond helpfully to an ambiguous request for 'a better update' by stating reasonable assumptions."},
+  {"id": "task_28", "genre": "constraint", "prompt": "Write a useful project update using exactly three bullet points and no introduction."},
+  {"id": "task_29", "genre": "contrarian", "prompt": "Challenge a proposal to add more process while remaining constructive and specific."},
+  {"id": "task_30", "genre": "mixed audience", "prompt": "Explain a security change to both engineers and non-technical managers in one message."}
 ]

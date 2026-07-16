@@ -140,10 +140,19 @@ echo ""
 # ── 6. Install /autoeval skill ───────────────────────────────────
 SKILL_SRC=".claude/skills/autoeval/SKILL.md"
 SKILL_DEST="$HOME/.claude/skills/autoeval/SKILL.md"
-if [ -f "$SKILL_SRC" ] && [ ! -f "$SKILL_DEST" ]; then
+if [ -f "$SKILL_SRC" ] && { [ ! -f "$SKILL_DEST" ] || ! cmp -s "$SKILL_SRC" "$SKILL_DEST"; }; then
   mkdir -p "$HOME/.claude/skills/autoeval"
   cp "$SKILL_SRC" "$SKILL_DEST"
-  echo "  ✓ /autoeval skill installed (type /autoeval in Claude Code to start a run)"
+  echo "  ✓ /autoeval skill installed or updated for Claude Code"
+  echo ""
+fi
+
+CODEX_SKILL_SRC=".agents/skills/autoeval/SKILL.md"
+CODEX_SKILL_DEST="$HOME/.codex/skills/autoeval/SKILL.md"
+if command -v codex &>/dev/null && [ -f "$CODEX_SKILL_SRC" ] && { [ ! -f "$CODEX_SKILL_DEST" ] || ! cmp -s "$CODEX_SKILL_SRC" "$CODEX_SKILL_DEST"; }; then
+  mkdir -p "$HOME/.codex/skills/autoeval"
+  cp "$CODEX_SKILL_SRC" "$CODEX_SKILL_DEST"
+  echo "  ✓ autoeval skill installed or updated for Codex"
   echo ""
 fi
 

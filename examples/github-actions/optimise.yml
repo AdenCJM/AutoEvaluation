@@ -16,7 +16,8 @@ permissions:
 
 concurrency:
   group: optimise
-  cancel-in-progress: true
+  # Never terminate the loop between candidate mutation and decision.
+  cancel-in-progress: false
 
 jobs:
   optimise:
@@ -34,7 +35,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyyaml
+          pip install -r requirements.txt
           # Read provider from config and install the right SDK
           PROVIDER=$(python3 -c "import yaml; print(yaml.safe_load(open('config.yaml'))['provider'])")
           case "$PROVIDER" in
@@ -52,12 +53,19 @@ jobs:
       - name: Run optimisation loop
         run: |
           ITERS=${{ github.event.inputs.iterations || '10' }}
-          python3 tools/run_loop.py --iterations "$ITERS"
+          # Scheduled segments preserve the untouched final test. Run once
+          # without --skip-final-test when the campaign is genuinely finished.
+          python3 tools/run_loop.py --iterations "$ITERS" --skip-final-test
 
       - name: Commit results
         run: |
           git config user.name "AutoEvaluation Bot"
           git config user.email "autoevaluation@users.noreply.github.com"
-          git add SKILL.md SKILL.md.best results.tsv
+          # Generated run artefacts are ignored locally by default. Scheduled
+          # runs deliberately persist them so the next checkout can resume.
+          git add SKILL.md
+          for file in SKILL.md.best results.tsv best_aggregate.json best_holdout_aggregate.json baseline_final_test_aggregate.json final_test_aggregate.json; do
+            [ ! -f "$file" ] || git add -f "$file"
+          done
           git diff --cached --quiet || git commit -m "autoeval: $(tail -1 results.tsv | cut -f1) — score $(tail -1 results.tsv | cut -f3)"
           git push

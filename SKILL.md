@@ -83,3 +83,14 @@ These words are AI tells. Do not use them:
 - **No corporate buzzword padding.** If a sentence still makes sense after you strip a word out, strip it out.
 - **Natural.** Read the sentence back. If it sounds like a press release or a LinkedIn post, rewrite it.
 - **Even formal documents should sound human.** Executive summaries, post-mortems, and reports still need to sound like a person wrote them. Don't slip into template language just because the format is professional. Write "revenue grew 15%" not "we achieved significant revenue growth". Write "the migration broke the site" not "an unforeseen issue was encountered during the migration process".
+
+## Pre-output self-check
+
+Before finalising any output, scan for these most commonly slipped violations and fix them:
+
+- **"touch base" / "circle back" / "align on"** → say what you actually mean: "catch up", "follow up", "agree on"
+- **"going forward" / "key takeaways" / "actionable insights"** → cut or rewrite in plain English
+- **"stakeholders"** → say who you mean: the team, the board, customers
+- **em dashes** → replace with a comma, semicolon, or rewrite the sentence
+- **"it is" / "that is" / "there is"** where a contraction fits → use "it's", "that's", "there's"
+- **Three sentences starting with "The"** → rewrite at least one with a different opener

@@ -20,7 +20,7 @@ This approach is powerful because:
 └────────┬────────┘
          │
          ├─→ Generate samples using current SKILL.md
-         │   (5-10 test prompts × replicates_per_prompt completions each)
+│   (about 30 prompts split into train, validation, and final test)
          │   (samples named sample_{i}_{prompt_id}_r{k})
          │
          ├─→ Judge each sample
@@ -47,7 +47,8 @@ This approach is powerful because:
          │   (Regenerate samples on train + holdout prompts → re-judge → new composite scores)
          │
          ├─→ Decide: Keep or Revert? (tools/decision.py)
-         │   1. Paired bootstrap CI, per-prompt, vs best_aggregate.json (accept_confidence, default 0.95)
+         │   1. Hierarchical bootstrap over prompts and replicates vs best_aggregate.json
+         │      with alpha spending across repeated and resumed iterations
          │      If the CI excludes zero → candidate KEEP passes step 1
          │   2. Holdout non-regression check vs best_holdout_aggregate.json
          │      If holdout score doesn't regress → confirmed KEEP
@@ -106,8 +107,10 @@ Each experiment modifies **exactly one thing** in `SKILL.md`. Why?
 LLM judges have variance. A score of 0.7214 vs 0.7205 might be random noise, not a real improvement. Comparing single-draw composite scores mostly measures that noise. Three mechanisms address this together:
 
 1. **Replicates** (`replicates_per_prompt`, default 3) — each prompt is sampled multiple times per experiment, so the composite score is an average, not a single draw. Replicate samples are named `sample_{i}_{prompt_id}_r{k}`.
-2. **Paired bootstrap decision** (`accept_rule: paired`, default) — `tools/decision.py` computes a per-prompt paired bootstrap confidence interval (default 95%, via `accept_confidence`) between the candidate and the current best. KEEP requires the CI to exclude zero — the improvement has to be statistically distinguishable from noise, not just numerically larger. The legacy `accept_rule: simple` (bare delta vs `min_improvement`) is preserved for compatibility.
-3. **Holdout validation** (`holdout_fraction`, default 0.3) — a slice of prompts is held out from the KEEP decision entirely. A candidate that passes the paired CI on the training prompts must also not regress on the holdout set, or it's discarded. This guards against overfitting the skill to the specific training prompts.
+2. **Hierarchical bootstrap decision** (`accept_rule: paired`, default) — `tools/decision.py` resamples prompt pairs and replicate scores. KEEP requires the corrected confidence interval to exclude zero. Fewer than eight shared training prompts explicitly fall back to conservative threshold mode.
+3. **Repeated-testing correction** (`sequential_correction: true`) — candidate test `k` spends `alpha / (k × (k + 1))`. The telescoping schedule bounds the cumulative false-positive budget even when a campaign is resumed without a known final iteration count.
+4. **Validation gate** (`holdout_fraction`, default 0.3) — a candidate that passes training must not regress on validation prompts. Because this split participates in selection, it is deliberately called validation rather than final evidence.
+5. **Untouched final test** (`final_test_fraction`, generated default 0.2) — scored at baseline and once after the loop. It never affects KEEP/DISCARD decisions.
 
 Before tuning any of these, run `python3 tools/run_loop.py --measure-noise 3` to see how much your own judge/prompt setup varies with no change at all.
 
@@ -150,30 +153,32 @@ Trade-off:
 
 ## File Ownership
 
-During an optimisation run, only `SKILL.md` is modified. All other files are immutable:
+The evaluation inputs remain fixed during a run; the loop also writes explicit state and result artefacts:
 
 | File | Mutability | Why |
 |------|-----------|-----|
 | `SKILL.md` | Read/write during loop | The target of optimisation |
-| `SKILL.md.best` | Write (tracked) | Copy of the best version seen |
-| `results.tsv` | Append-only | Full experiment history, immutable for reproducibility |
-| `best_aggregate.json` | Write (tracked, gitignored) | Best run's per-prompt scores, for the paired comparison |
-| `best_holdout_aggregate.json` | Write (tracked, gitignored) | Best run's holdout-set scores |
+| `SKILL.md.best` | Write (gitignored by default) | Copy of the best version seen |
+| `results.tsv` | Atomic append/update | Full experiment history and confirmed decisions |
+| `best_aggregate.json` | Write (gitignored) | Best run's per-prompt scores |
+| `best_holdout_aggregate.json` | Write (gitignored) | Best run's validation scores |
+| `.tmp/run_state.json` | Write | Crash-recovery journal |
+| `.tmp/run.lock` | Write | Single-process mutation lock |
 | `config.yaml` | Read-only | Configuration is fixed during a run |
 | `prompts/prompts.json` | Read-only | Test prompts are fixed during a run |
 | `tools/` | Read-only | Evaluation harness is deterministic (includes `decision.py`, `results_io.py`) |
 | `.tmp/samples/` | Write (intermediate) | Disposable: samples, logs, intermediate results |
 
-This design ensures **reproducibility**: given the same config and prompts, the same sequence of experiments produces the same results.
+This design supports **auditability**, not bit-for-bit reproducibility. LLM outputs remain stochastic and provider behaviour can change. Pin model snapshots where available, retain all aggregates, and repeat campaigns when publishing evidence.
 
 ## Cost Estimation
 
-Every API call is tracked:
+Every API call that returns provider usage metadata is tracked:
 - Tokens in/out per call
 - Per-model pricing, looked up from the `_PRICING` table in `tools/model_client.py` (longest-prefix match on model ID)
 - Cumulative cost estimate printed at run end
 
-The `max_cost_usd` limit stops the loop if estimated spend exceeds the budget. It only enforces a budget for models with a pricing entry — unknown models print a cost-tracking warning instead of a hard stop.
+Token logs retain the serving model, so generator, judge, and modifier calls are priced independently without double-counting the parent process. If a cost cap is configured, startup fails when any configured model lacks pricing. The loop uses completed-iteration cost to avoid starting another iteration when its projected cost would cross `max_cost_usd`. Provider billing can still differ and the first iteration has no historical projection.
 
 Why estimate, not actual? Because the system doesn't control provider billing; it only knows what it sent. A conservative estimate (tokens × provider rates) helps users stay within budget.
 
@@ -203,14 +208,14 @@ For Phase 1, the single-best approach is justified. If Phase 1 experiments show 
 
 ### Claude Code (`program.md` + `/autoeval` skill)
 
-`program.md` encodes the loop as instructions: baseline → analyse → modify → evaluate → decide → repeat. It's the loop spec, not an entry point in itself.
+`program.md` is an agent-facing runbook. It intentionally delegates the complete state machine to `tools/run_loop.py` rather than duplicating mutation logic in prose.
 
-The `/autoeval` skill (installed automatically by `start.sh` into `~/.claude/skills/`) is the actual Claude Code entry point. It runs three phases — conversational setup, a live dashboard, then autopilot — following the spec in `program.md`. The headless `tools/run_loop.py` driver implements the same spec without any Claude Code dependency.
+The `/autoeval` skill is the Claude Code entry point. It handles conversational setup and dashboard orientation, then launches `tools/run_loop.py`, which owns locking, recovery, evaluation, decisions, and finalisation without a Claude Code dependency.
 
 Why a separate spec file? Because:
 - The loop logic is separate from the system logic
 - Users can understand and modify loop behaviour without touching code
-- Both the skill and the headless driver read the same spec, so they can't drift out of sync
+- Every supported surface executes the same driver, so state transitions cannot drift
 
 ### GitHub Actions
 
@@ -232,7 +237,7 @@ Why optional? Because:
 
 ## Future Directions (from TODOS)
 
-**P3: Alternative search algorithms** — Explore simulated annealing, evolutionary strategies, or random restarts. The current hill-climbing is non-convex-unfriendly; population-based methods might find better optima. The noise problem underneath this (was a bare score comparison reliable enough to trust a KEEP?) was addressed in the July 2026 modernisation via replicates, paired bootstrap decisions, and holdout validation — alternative search algorithms remain future work, now on a firmer statistical foundation.
+**P3: Alternative search algorithms** — Explore simulated annealing, evolutionary strategies, or random restarts. The current hill-climbing is non-convex-unfriendly; population-based methods might find better optima. Replicates, hierarchical bootstrap, repeated-testing correction, validation, and a separate final test improve the evidence underneath the search, but repeated independent campaigns are still required for strong comparative claims.
 
 **P3: Live public dashboard** — Turn the experiment into content: a public dashboard showing AutoEvaluation running in real-time.
 

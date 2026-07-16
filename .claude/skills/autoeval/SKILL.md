@@ -133,8 +133,9 @@ Check `.env` in the project root for existing API keys (GEMINI_API_KEY, OPENAI_A
   - B) OpenAI (GPT-5.4)
   - C) Anthropic (Claude Sonnet 5)
 
-After they specify the provider, if the key isn't in `.env`, ask:
-> "Paste your [Provider] API key and I'll save it to .env:"
+After they specify the provider, if the key isn't in `.env`, tell them which
+environment variable to add to `.env` and wait for confirmation. Never ask for
+an API key in chat or pass one as a command-line argument.
 
 ### Step 1.4b: Judge model
 
@@ -170,7 +171,6 @@ python3 tools/generate_config.py \
   --skill-description "<description>" \
   --skill-content "<content>" \
   --provider <provider> \
-  --api-key "<key>" \
   --judge-model "<judge model, if chosen in Step 1.4b>" \
   --metrics '<json_array>' \
   --iterations <N> \
@@ -178,9 +178,9 @@ python3 tools/generate_config.py \
 ```
 
 **Option B:** If generate_config.py doesn't exist or fails, write the files yourself:
-- `config.yaml` — provider, model, api_key_env, judge settings, metrics, iterations, and the evaluation-statistics keys (`replicates_per_prompt: 3`, `accept_rule: paired`, `holdout_fraction: 0.3`, `judge_sees_skill: true`) — copy the shape from `config.template.yaml`
+- `config.yaml` — provider, model, api_key_env, judge settings, metrics, iterations, and the evaluation-statistics keys (`replicates_per_prompt: 3`, `accept_rule: paired`, `holdout_fraction: 0.3`, `final_test_fraction: 0.2`, `sequential_correction: true`, `judge_sees_skill: true`) — copy the shape from `config.template.yaml`
 - `SKILL.md` — the skill with YAML frontmatter
-- `prompts/prompts.json` — test prompts (generate 8-10 diverse ones based on the skill; with `holdout_fraction: 0.3` the last ~3 become the holdout validation set)
+- `prompts/prompts.json` — about 30 diverse prompts; generated defaults allocate 30% to validation and 20% to an untouched final test
 - `.env` — API key
 - `.claude/settings.json` — auto-approve rules
 
@@ -230,7 +230,8 @@ Tell the user:
 >
 > 1. I'll run a baseline evaluation to establish the starting score (several completions per prompt, so scores carry a variance estimate)
 > 2. Then I'll iterate: analyse weaknesses → modify the skill → re-evaluate → keep or revert
-> 3. A change is only kept when the improvement clears the score noise AND doesn't regress on held-out test prompts
+> 3. A change is only kept when the alpha-spending-corrected hierarchical-bootstrap interval clears zero and it doesn't regress on validation prompts
+> 4. An untouched final-test split is reported at the end and never influences selection
 > 4. You can watch progress on the dashboard or just check back later
 > 5. If you want to steer me (e.g. "focus on tone"), just send a message
 >

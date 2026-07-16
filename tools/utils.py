@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 # Default model per provider — the single source of truth for every setup
 # surface (setup.py, generate_config.py, run_loop.py quick-start).
-# Verified against provider pricing pages 2026-07-07. When these move a
+# Verified against provider model pages 2026-07-16. When these move a
 # generation, update here and in ModelClient._PRICING together.
 DEFAULT_MODELS = {
     "gemini": ("gemini-3.5-flash", "GEMINI_API_KEY"),
@@ -102,33 +102,78 @@ def sanitise_description(desc: str) -> str:
     return re.sub(r'[\t\n\r\x00-\x1f]', ' ', desc).strip()
 
 
+def split_prompt_sets(
+    prompts: list[dict],
+    holdout_fraction: float,
+    final_test_fraction: float = 0.0,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Split prompts into train, validation, and untouched final-test sets.
+
+    ``holdout`` remains the on-loop validation set for backwards
+    compatibility. ``final_test`` is evaluated at baseline and once after the
+    loop; it never participates in KEEP/DISCARD decisions.
+    """
+    explicit_train = [p for p in prompts if p.get("split") == "train"]
+    explicit_holdout = [p for p in prompts if p.get("split") in ("holdout", "validation")]
+    explicit_final = [p for p in prompts if p.get("split") == "final_test"]
+    recognised = ("train", "holdout", "validation", "final_test")
+    unassigned = [p for p in prompts if p.get("split") not in recognised]
+
+    n = len(unassigned)
+    n_final = max(1, round(n * final_test_fraction)) if final_test_fraction > 0 and n > 2 else 0
+    n_holdout = max(1, round(n * holdout_fraction)) if holdout_fraction > 0 and n > 1 else 0
+    # Always preserve at least one automatically assigned training prompt.
+    overflow = max(0, n_holdout + n_final - max(0, n - 1))
+    while overflow and n_final:
+        n_final -= 1
+        overflow -= 1
+    while overflow and n_holdout:
+        n_holdout -= 1
+        overflow -= 1
+
+    final_start = n - n_final
+    holdout_start = final_start - n_holdout
+    auto_train = unassigned[:holdout_start]
+    auto_holdout = unassigned[holdout_start:final_start]
+    auto_final = unassigned[final_start:] if n_final else []
+    return (
+        explicit_train + auto_train,
+        explicit_holdout + auto_holdout,
+        explicit_final + auto_final,
+    )
+
+
+def validate_prompts(prompts: list[dict]) -> None:
+    """Validate prompt records before any paid model call is made."""
+    if not isinstance(prompts, list) or not prompts:
+        raise ValueError("prompts file must contain a non-empty JSON array")
+    seen = set()
+    allowed_splits = {None, "train", "holdout", "validation", "final_test"}
+    for index, prompt in enumerate(prompts):
+        if not isinstance(prompt, dict):
+            raise ValueError(f"prompt {index} must be an object")
+        for field in ("id", "genre", "prompt"):
+            if not isinstance(prompt.get(field), str) or not prompt[field].strip():
+                raise ValueError(f"prompt {index} requires a non-empty string {field!r}")
+        if prompt["id"] in seen:
+            raise ValueError(f"duplicate prompt id: {prompt['id']!r}")
+        seen.add(prompt["id"])
+        if prompt.get("split") not in allowed_splits:
+            raise ValueError(
+                f"prompt {prompt['id']!r} has invalid split {prompt.get('split')!r}"
+            )
+
+
 def split_prompts(prompts: list[dict], holdout_fraction: float) -> tuple[list[dict], list[dict]]:
     """Split prompts into (train, holdout) sets deterministically.
 
     Prompts carrying an explicit "split" key ("train" or "holdout") are
-    honoured as-is. Of the remainder, the last ceil(n * holdout_fraction)
+    honoured as-is. Of the remainder, the last rounded fraction of prompts
     prompts (in file order) become holdout, so the assignment is stable
     across runs and re-reads.
     """
-    explicit_train = [p for p in prompts if p.get("split") == "train"]
-    explicit_holdout = [p for p in prompts if p.get("split") == "holdout"]
-    unassigned = [p for p in prompts if p.get("split") not in ("train", "holdout")]
-
-    if holdout_fraction > 0 and len(unassigned) > 1:
-        # round() tracks the fraction on small sets (ceil overshoots badly:
-        # 3 prompts at 0.34 would hold out 2); always hold out at least 1
-        n_holdout = max(1, round(len(unassigned) * holdout_fraction))
-    else:
-        n_holdout = 0
-    # Never let the holdout swallow the training set
-    n_holdout = min(n_holdout, max(0, len(unassigned) - 1))
-
-    if n_holdout:
-        auto_train, auto_holdout = unassigned[:-n_holdout], unassigned[-n_holdout:]
-    else:
-        auto_train, auto_holdout = unassigned, []
-
-    return explicit_train + auto_train, explicit_holdout + auto_holdout
+    train, holdout, final_test = split_prompt_sets(prompts, holdout_fraction, 0.0)
+    return train, holdout + final_test
 
 
 def validate_config(cfg: dict) -> dict:
@@ -172,6 +217,8 @@ def validate_config(cfg: dict) -> dict:
     cfg.setdefault("accept_confidence", 0.95)
     cfg.setdefault("min_valid_sample_frac", 0.8)
     cfg.setdefault("holdout_fraction", 0.3)
+    cfg.setdefault("final_test_fraction", 0.0)
+    cfg.setdefault("sequential_correction", True)
 
     if not isinstance(cfg["replicates_per_prompt"], int) or cfg["replicates_per_prompt"] < 1:
         print("Error: replicates_per_prompt must be an integer >= 1", file=sys.stderr)
@@ -187,6 +234,12 @@ def validate_config(cfg: dict) -> dict:
         sys.exit(1)
     if not (0.0 <= float(cfg["holdout_fraction"]) <= 0.5):
         print("Error: holdout_fraction must be in [0, 0.5]", file=sys.stderr)
+        sys.exit(1)
+    if not (0.0 <= float(cfg["final_test_fraction"]) <= 0.5):
+        print("Error: final_test_fraction must be in [0, 0.5]", file=sys.stderr)
+        sys.exit(1)
+    if float(cfg["holdout_fraction"]) + float(cfg["final_test_fraction"]) > 0.6:
+        print("Error: holdout_fraction + final_test_fraction must be <= 0.6", file=sys.stderr)
         sys.exit(1)
 
     return cfg

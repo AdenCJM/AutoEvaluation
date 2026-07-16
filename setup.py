@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 from utils import DEFAULT_MODELS, load_env, default_dimensions
 from generate_config import write_all as _write_all
+from run_state import atomic_write_text
 
 # Cheap judge model per provider — offered as the default separate judge
 _JUDGE_SUGGESTIONS = {
@@ -243,7 +244,7 @@ def step_prompts() -> list[dict]:
     print("=" * 50)
     print("Define test scenarios that the skill will be evaluated against.")
     print("Each prompt should be a realistic task that exercises the skill.")
-    print("Aim for 5-10 prompts covering different aspects of your use case.")
+    print("Aim for about 30 prompts covering realistic cases, constraints, and edge conditions.")
     print()
 
     prompts = []
@@ -390,7 +391,7 @@ def generate_test_prompts_with_ai(
 ) -> list[dict]:
     """Use the configured LLM to generate test prompts from a skill description.
 
-    Asks the AI to generate 5-10 diverse test prompts that exercise
+    Asks the AI to generate 30 diverse test prompts that exercise
     different aspects of the skill.
     """
     print("\n" + "=" * 50)
@@ -407,7 +408,7 @@ def generate_test_prompts_with_ai(
 
     system_prompt = """You are a test scenario designer for LLM skill evaluation.
 
-Given a skill file (instructions that tell an LLM how to behave), generate 5-10 diverse test prompts
+Given a skill file (instructions that tell an LLM how to behave), generate exactly 30 diverse test prompts
 that would thoroughly exercise the skill across different situations.
 
 Each prompt should:
@@ -433,7 +434,7 @@ Description: {skill_description}
 Skill instructions:
 {skill_content}
 
-Generate 5-10 diverse test prompts that would thoroughly evaluate this skill. Return ONLY the JSON array."""
+Generate exactly 30 diverse test prompts that would thoroughly evaluate this skill. Return ONLY the JSON array."""
 
     try:
         response = client.generate(system_prompt, user_prompt, max_tokens=2048)
@@ -534,6 +535,31 @@ _DEFAULT_PROMPTS = [
         "genre": "general",
         "prompt": "Write a two-paragraph blog post intro about how your team solved a recent challenge.",
     },
+    {"id": "task_6", "genre": "formal email", "prompt": "Write a formal email explaining a missed deadline and the recovery plan."},
+    {"id": "task_7", "genre": "customer support", "prompt": "Reply to a frustrated customer whose issue has recurred twice."},
+    {"id": "task_8", "genre": "technical explanation", "prompt": "Explain rate limiting to a junior developer with one concrete example."},
+    {"id": "task_9", "genre": "executive summary", "prompt": "Summarise a quarter where revenue rose but customer churn also increased."},
+    {"id": "task_10", "genre": "documentation", "prompt": "Write setup instructions for a command-line tool, including verification and rollback."},
+    {"id": "task_11", "genre": "proposal", "prompt": "Propose a small internal automation project, including scope, risks, and success measures."},
+    {"id": "task_12", "genre": "incident report", "prompt": "Write a concise post-incident summary for a 45-minute production outage."},
+    {"id": "task_13", "genre": "marketing", "prompt": "Describe a developer feature without hype or unsupported claims."},
+    {"id": "task_14", "genre": "opinion", "prompt": "Argue for or against four-day work weeks and acknowledge the strongest counterargument."},
+    {"id": "task_15", "genre": "editing", "prompt": "Rewrite this sentence plainly: 'We leveraged cross-functional synergies to operationalise strategic outcomes.'"},
+    {"id": "task_16", "genre": "announcement", "prompt": "Announce a pricing change while explaining who is affected and when."},
+    {"id": "task_17", "genre": "feedback", "prompt": "Give kind but direct feedback to a colleague whose reports are consistently late."},
+    {"id": "task_18", "genre": "meeting notes", "prompt": "Turn messy meeting notes into decisions, owners, and open questions."},
+    {"id": "task_19", "genre": "tutorial", "prompt": "Teach a beginner how to diagnose a failed deployment without assuming specialist knowledge."},
+    {"id": "task_20", "genre": "comparison", "prompt": "Compare two project management approaches in a compact table and recommendation."},
+    {"id": "task_21", "genre": "sensitive communication", "prompt": "Tell a team that a planned project has been cancelled without blaming individuals."},
+    {"id": "task_22", "genre": "long-form", "prompt": "Write a structured 600-word article about why observability matters in distributed systems."},
+    {"id": "task_23", "genre": "short-form", "prompt": "Explain a two-week delay in no more than 40 words."},
+    {"id": "task_24", "genre": "creative", "prompt": "Write a short opening scene in which two engineers discover an unexpected system behaviour."},
+    {"id": "task_25", "genre": "data commentary", "prompt": "Explain a chart showing sales up 12%, margin down 4%, and returns up 9%."},
+    {"id": "task_26", "genre": "FAQ", "prompt": "Write five concise FAQ answers for a beta feature with known limitations."},
+    {"id": "task_27", "genre": "boundary", "prompt": "Respond helpfully to an ambiguous request for 'a better update' by stating reasonable assumptions."},
+    {"id": "task_28", "genre": "constraint", "prompt": "Write a useful project update using exactly three bullet points and no introduction."},
+    {"id": "task_29", "genre": "contrarian", "prompt": "Challenge a proposal to add more process while remaining constructive and specific."},
+    {"id": "task_30", "genre": "mixed audience", "prompt": "Explain a security change to both engineers and non-technical managers in one message."},
 ]
 
 
@@ -565,7 +591,7 @@ def write_files(
     # .gitignore).
     if skill_content is not None:
         skill_path = PROJECT_ROOT / skill_path_config
-        skill_path.write_text(skill_content, encoding="utf-8")
+        atomic_write_text(skill_path, skill_content)
         print(f"  ✓ {skill_path_config}")
 
     _write_all(

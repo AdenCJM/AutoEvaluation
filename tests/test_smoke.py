@@ -465,12 +465,12 @@ def test_run_loop_keep_discard(tmp_path):
     """Score > best → KEEP, score <= best → DISCARD."""
     from run_loop import get_best_score
     tsv = tmp_path / "results.tsv"
-    tsv.write_text("run_id\ttimestamp\tcomposite_score\n" "baseline\t2024-01-01\t0.5000\n")
+    tsv.write_text("run_id\ttimestamp\tcomposite_score\tdecision\n" "baseline\t2024-01-01\t0.5000\tBASELINE\n")
     assert get_best_score(tsv) == 0.5
 
     # Add a higher score
     with open(tsv, "a") as f:
-        f.write("exp_001\t2024-01-01\t0.7000\n")
+        f.write("exp_001\t2024-01-01\t0.7000\tKEEP\n")
     assert get_best_score(tsv) == 0.7
 
 
@@ -840,9 +840,11 @@ def test_token_log_aggregation(tmp_path):
         (log_dir / "token_usage_5678.jsonl").write_text(
             '{"input": 300, "output": 150, "model": "test"}\n'
         )
-        total_in, total_out = aggregate_token_usage()
-        assert total_in == 600
-        assert total_out == 300
+        usage = aggregate_token_usage()
+        assert usage["input_tokens"] == 600
+        assert usage["output_tokens"] == 300
+        assert usage["by_model"]["test"] == {"input": 600, "output": 300}
+        assert usage["unknown_models"] == ["test"]
     finally:
         run_loop.PROJECT_ROOT = old_root
 
@@ -854,9 +856,10 @@ def test_token_log_no_files(tmp_path):
     run_loop.PROJECT_ROOT = tmp_path
 
     try:
-        total_in, total_out = aggregate_token_usage()
-        assert total_in == 0
-        assert total_out == 0
+        usage = aggregate_token_usage()
+        assert usage["input_tokens"] == 0
+        assert usage["output_tokens"] == 0
+        assert usage["estimated_cost_usd"] == 0
     finally:
         run_loop.PROJECT_ROOT = old_root
 
@@ -874,11 +877,143 @@ def test_token_log_malformed(tmp_path):
             'NOT VALID JSON\n'
             '{"input": 100, "output": 50, "model": "test"}\n'
         )
-        total_in, total_out = aggregate_token_usage()
-        assert total_in == 100  # Good line counted
-        assert total_out == 50
+        usage = aggregate_token_usage()
+        assert usage["input_tokens"] == 100  # Good line counted
+        assert usage["output_tokens"] == 50
     finally:
         run_loop.PROJECT_ROOT = old_root
+
+
+def test_token_cost_is_priced_per_model_without_parent_double_count(tmp_path):
+    from run_loop import aggregate_token_usage
+    import run_loop
+    old_root = run_loop.PROJECT_ROOT
+    run_loop.PROJECT_ROOT = tmp_path
+    try:
+        log_dir = tmp_path / ".tmp"
+        log_dir.mkdir()
+        (log_dir / "token_usage_1.jsonl").write_text(
+            '{"input": 1000, "output": 100, "model": "gemini-2.5-flash"}\n'
+            '{"input": 2000, "output": 200, "model": "gpt-5.4-mini"}\n'
+        )
+        usage = aggregate_token_usage()
+        expected = (1000 * 0.30e-6 + 100 * 2.50e-6
+                    + 2000 * 0.75e-6 + 200 * 4.50e-6)
+        assert usage["estimated_cost_usd"] == pytest.approx(expected)
+        assert usage["input_tokens"] == 3000
+    finally:
+        run_loop.PROJECT_ROOT = old_root
+
+
+def test_three_way_prompt_split_keeps_final_test_untouched():
+    from utils import split_prompt_sets
+    prompts = [{"id": f"p{i}", "prompt": "x"} for i in range(30)]
+    train, validation, final_test = split_prompt_sets(prompts, 0.3, 0.2)
+    assert len(train) == 15
+    assert len(validation) == 9
+    assert len(final_test) == 6
+    assert not ({p["id"] for p in train} & {p["id"] for p in final_test})
+
+
+def test_hierarchical_bootstrap_uses_replicates():
+    from decision import paired_verdict
+    best = {f"p{i}": {"composite": 0.5, "replicates": [0.45, 0.5, 0.55]} for i in range(10)}
+    candidate = {f"p{i}": {"composite": 0.7, "replicates": [0.65, 0.7, 0.75]} for i in range(10)}
+    verdict = paired_verdict(candidate, best)
+    assert verdict["keep"] is True
+    assert verdict["method"] == "hierarchical-bootstrap"
+
+
+def test_duplicate_experiment_output_is_rejected_before_generation(tmp_path):
+    import experiment_runner
+    old_root = experiment_runner.PROJECT_ROOT
+    experiment_runner.PROJECT_ROOT = tmp_path
+    try:
+        (tmp_path / ".tmp" / "samples" / "exp_001").mkdir(parents=True)
+        with pytest.raises(RuntimeError, match="already has output"):
+            experiment_runner.run_experiment(
+                "exp_001",
+                {"llm_judge_dimensions": [], "deterministic_metrics": []},
+            )
+    finally:
+        experiment_runner.PROJECT_ROOT = old_root
+
+
+def test_experiment_outputs_are_promoted_only_after_complete(tmp_path, monkeypatch):
+    import subprocess
+    import experiment_runner
+
+    monkeypatch.setattr(experiment_runner, "PROJECT_ROOT", tmp_path)
+
+    def fake_run_tool(script, args):
+        if script == "generate_samples.py":
+            out = Path(args[args.index("--output-dir") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "sample_0_p1.txt").write_text("sample")
+        elif script == "eval_llm_judge.py":
+            out = Path(args[args.index("--output-path") + 1])
+            out.write_text(json.dumps({"quality": {"normalised": 0.75}}))
+        elif script == "score_aggregator.py":
+            out = Path(args[args.index("--output-path") + 1])
+            out.write_text(json.dumps({
+                "composite_score": 0.75,
+                "metric_averages": {"quality": 0.75},
+                "per_prompt": {"p1": {"composite": 0.75, "n": 1, "replicates": [0.75]}},
+                "sample_count": 1,
+            }))
+        return subprocess.CompletedProcess([script], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(experiment_runner, "run_tool", fake_run_tool)
+    cfg = {
+        "skill_path": "SKILL.md", "prompts_path": "prompts.json",
+        "results_tsv": "results.tsv", "llm_judge_dimensions": [
+            {"name": "quality", "weight": 1.0, "rubric": "good"}
+        ],
+    }
+    result = experiment_runner.run_experiment("exp_001", cfg)
+    assert result["composite_score"] == 0.75
+    assert (tmp_path / ".tmp/samples/exp_001/sample_0_p1.txt").exists()
+    assert (tmp_path / ".tmp/evals/exp_001/aggregate.json").exists()
+    assert not list((tmp_path / ".tmp/work").glob("exp_001-*"))
+
+
+def test_run_lock_rejects_concurrent_owner(tmp_path, monkeypatch):
+    import run_state
+    monkeypatch.setattr(run_state, "LOCK_PATH", tmp_path / "run.lock")
+    monkeypatch.setattr(run_state, "STATE_PATH", tmp_path / "run_state.json")
+    with run_state.run_lock():
+        with pytest.raises(RuntimeError, match="already running"):
+            with run_state.run_lock():
+                pass
+    assert not (tmp_path / "run.lock").exists()
+
+
+def test_dashboard_best_excludes_discarded_candidates(tmp_path):
+    from dashboard_server import read_tsv
+    tsv = tmp_path / "results.tsv"
+    tsv.write_text(
+        "run_id\tcomposite_score\tdecision\n"
+        "baseline\t0.5000\tBASELINE\n"
+        "exp_001\t0.9900\tDISCARD\n"
+        "exp_002\t0.7000\tKEEP\n"
+    )
+    data = read_tsv(tsv, {"metric_names": [], "metric_labels": {}, "metric_directions": {}})
+    assert data["best"]["run_id"] == "exp_002"
+
+
+def test_local_markdown_links_resolve():
+    import re
+    files = [PROJECT_ROOT / "README.md", *PROJECT_ROOT.glob("docs/*.md"),
+             *PROJECT_ROOT.glob("examples/**/*.md")]
+    missing = []
+    for path in files:
+        for target in re.findall(r"\[[^]]*\]\(([^)]+)\)", path.read_text(encoding="utf-8")):
+            target = target.split("#", 1)[0]
+            if not target or "://" in target or target.startswith(("mailto:", "#")):
+                continue
+            if not (path.parent / target).resolve().exists():
+                missing.append((str(path.relative_to(PROJECT_ROOT)), target))
+    assert missing == []
 
 
 # ── Prompt ID sanitisation tests ──────────────────────────────────
@@ -905,7 +1040,7 @@ def test_min_improvement_keeps_above_threshold(tmp_path):
     """Score delta > min_improvement → KEEP."""
     from run_loop import get_best_score
     tsv = tmp_path / "results.tsv"
-    tsv.write_text("run_id\ttimestamp\tcomposite_score\n" "baseline\t2024-01-01\t0.5000\n")
+    tsv.write_text("run_id\ttimestamp\tcomposite_score\tdecision\n" "baseline\t2024-01-01\t0.5000\tBASELINE\n")
     best = get_best_score(tsv)
     new_score = 0.52  # delta = 0.02 > default threshold of 0.01
     assert new_score - best > 0.01
@@ -915,7 +1050,7 @@ def test_min_improvement_discards_below_threshold(tmp_path):
     """Score delta <= min_improvement → DISCARD (noise)."""
     from run_loop import get_best_score
     tsv = tmp_path / "results.tsv"
-    tsv.write_text("run_id\ttimestamp\tcomposite_score\n" "baseline\t2024-01-01\t0.5000\n")
+    tsv.write_text("run_id\ttimestamp\tcomposite_score\tdecision\n" "baseline\t2024-01-01\t0.5000\tBASELINE\n")
     best = get_best_score(tsv)
     new_score = 0.505  # delta = 0.005 < default threshold of 0.01
     assert new_score - best <= 0.01
@@ -1165,6 +1300,19 @@ def test_results_io_roundtrip(tmp_path):
     assert rows[0]["holdout_composite"] == "0.7900"
     assert results_io.best_composite(tsv) == pytest.approx(0.8)
     assert results_io.latest_run_id(tsv) == "baseline"
+
+
+def test_results_io_best_ignores_discarded_and_incomplete_candidates(tmp_path):
+    import results_io
+    tsv = tmp_path / "results.tsv"
+    tsv.write_text(
+        "run_id\tcomposite_score\tdecision\n"
+        "baseline\t0.5000\tBASELINE\n"
+        "exp_001\t0.9900\tDISCARD\n"
+        "exp_002\t0.9800\t\n"
+        "exp_003\t0.7000\tKEEP\n"
+    )
+    assert results_io.best_composite(tsv) == pytest.approx(0.7)
 
 
 def test_results_io_migrates_legacy_header(tmp_path):

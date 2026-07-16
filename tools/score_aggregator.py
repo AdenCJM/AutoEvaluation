@@ -165,7 +165,11 @@ def aggregate(eval_dir: str, cfg: dict) -> dict:
     for s in per_sample:
         per_prompt.setdefault(s["prompt_id"], []).append(s["composite"])
     per_prompt = {
-        pid: {"composite": round(statistics.mean(vals), 4), "n": len(vals)}
+        pid: {
+            "composite": round(statistics.mean(vals), 4),
+            "n": len(vals),
+            "replicates": vals,
+        }
         for pid, vals in per_prompt.items()
     }
 

@@ -24,11 +24,11 @@
 **Effort:** L (human: ~2 weeks research + implementation) / M (CC: ~3-4 hours)
 **Blocked by:** Nothing technically. Needs experimentation to validate whether alternative algorithms actually outperform hill-climbing on prompt optimisation tasks.
 **Added:** 2026-03-30, eng review (outside voice finding)
-**Update 2026-07-07:** The noise problem underneath this item is now addressed — replicates per prompt, paired bootstrap KEEP/DISCARD decisions (`tools/decision.py`), and holdout validation shipped in the July 2026 modernisation. A KEEP is now a statistically defensible signal, not a bare score comparison. Alternative search algorithms remain future work, but they'd now be climbing on a more reliable signal.
+**Update 2026-07-16:** The signal is materially stronger: about 30 prompts, replicate-aware hierarchical bootstrap, alpha spending across resumed campaigns, a validation gate, and an untouched final test. A KEEP is evidence for selection, not proof of general improvement; publishable claims still require the independent-campaign protocol in `examples/writing-style/BENCHMARK.md`.
 
 ## Recently addressed
 
-- **2026-07-07 — July 2026 modernisation.** Models refreshed to current IDs (`gemini-3.5-flash`, `gpt-5.4`, `claude-sonnet-5` as defaults); judge failures are now excluded from scores instead of counted as zeros; judge output uses structured/schema-enforced JSON with a prompt-and-parse fallback; KEEP/DISCARD decisions are noise-aware (replicates + paired bootstrap CI + holdout non-regression check) instead of a bare score delta.
+- **2026-07-16 — reliability hardening.** Added isolated experiment promotion, locking and crash recovery, per-model cost accounting, hierarchical bootstrap, alpha spending, validation/final-test separation, working CI and scheduled persistence, safer setup permissions, and a current benchmark protocol.
 
 ## Deferred — After launch
 

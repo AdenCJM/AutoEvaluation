@@ -4,7 +4,7 @@
 
 Give it a prompt, a set of test scenarios, and a scoring rubric. It runs autonomously: generate outputs, score them, read the judge's reasoning, find the weakest metric, rewrite the prompt to fix it, re-score, keep or revert. Hill-climbing on prompt engineering, fully hands-off.
 
-I pointed it at a writing style guide and let it run overnight. It made 20 attempts, kept 2, and improved the composite score from 0.9508 to 0.9692. The changes it made: strengthened contraction rules, added concrete before/after examples for em dash replacement. Every other LLM prompt optimiser (DSPy, TextGrad, MIPRO) requires you to write Python. This one works on plain markdown files.
+I pointed an earlier version at a writing style guide overnight. It made 20 attempts, kept 2, and improved its selected composite score from 0.9508 to 0.9692. The useful difference is the interface: AutoEvaluation works directly on plain Markdown instruction files, with no application DSL required. That historical run demonstrates the workflow; the included benchmark protocol defines the stronger evidence required for current statistical claims.
 
 Point it at any LLM instruction set. Go to bed. Wake up with a measurably better prompt.
 
@@ -30,16 +30,16 @@ graph LR
 1. **Analyse** — reads the weakest metrics AND the actual sample outputs that scored poorly, including the judge's reasoning for each score. The modifier sees *why* scores are low, not just numbers.
 2. **Modify** — makes ONE targeted change to the skill instructions, grounded in concrete failure examples.
 3. **Evaluate** — generates outputs using the modified skill, scores them against your rubric.
-4. **Decide** — a noise-aware, paired bootstrap comparison (per-prompt, at a configurable confidence level) decides KEEP or DISCARD, not a bare score delta. A KEEP must also hold up on a held-out set of prompts it wasn't optimised against, guarding against overfitting to the training prompts.
+4. **Decide** — a hierarchical bootstrap resamples prompts and stochastic replicates. An alpha-spending schedule controls repeated testing across arbitrarily long or resumed runs, and a separate validation split gates prospective KEEPs.
 5. **Repeat** — until the iteration, time, or cost limit is hit (or indefinitely).
 
 ### What makes this different
 
-Every other prompt optimiser treats prompts as parameters to optimise computationally. DSPy requires a Python DSL. AutoPrompt needs labelled datasets. OpenAI's optimizer is platform-locked. Meta's prompt-ops is Llama-only.
+Most prompt-optimisation frameworks are code- or platform-centric. DSPy, for example, expresses optimisable programs in Python; hosted optimisers are commonly tied to one provider. AutoEvaluation is deliberately file-native: its optimisation target is an ordinary Markdown instruction document.
 
 AutoEvaluation treats prompts as prose documents that an LLM reads, critiques, and rewrites. No DSL. No compilation step. No framework lock-in. Just a markdown file and test prompts. It's "editor doing revision" vs "compiler doing gradient descent."
 
-### Real results
+### Historical result
 
 I ran AutoEvaluation on an anti-AI writing style guide (the included example) for 20 iterations using Gemini 2.5 Flash:
 
@@ -51,9 +51,9 @@ exp_002     0.9600   KEEP       Strengthened contraction rule with emphasis
 exp_005     0.9692   KEEP       Added concrete em-dash before/after example
 ```
 
-18 of 20 attempts were discarded (score didn't improve enough to pass the noise threshold). The 2 that stuck made targeted, specific changes. Total run time: ~2 hours. Total API cost: <$2.
+18 of 20 attempts were discarded by the earlier threshold-based decision rule. The 2 that stuck made targeted, specific changes. Total run time was about two hours and estimated API cost was under $2.
 
-The full experiment history is in `examples/writing-style/sample-results.tsv`.
+The full experiment history is in `examples/writing-style/sample-results.tsv`. This run predates hierarchical bootstrap, sequential correction, and untouched final-test reporting, so it demonstrates the product workflow rather than validating the current statistical method. New benchmark runs should follow `examples/writing-style/BENCHMARK.md`.
 
 ![AutoEvaluation dashboard showing score trend and per-metric cards](docs/dashboard.png)
 
@@ -136,7 +136,7 @@ It generates: `config.yaml`, `SKILL.md`, `prompts/prompts.json`, `.env`, and `.c
 **Skip all prompts:**
 
 ```bash
-# All defaults: Gemini, default rubric, 5 generic prompts, 10 iterations
+# All defaults: Gemini, default rubric, 30 diverse prompts, 10 iterations
 python3 setup.py --defaults
 
 # Defaults with a custom skill and AI-generated prompts
@@ -167,9 +167,9 @@ Then, inside Claude Code:
 /autoeval
 ```
 
-The skill runs through three phases — conversational setup, a live dashboard, then autopilot — following the loop spec in `program.md`. It autonomously runs experiments, modifies your skill, and tracks results. All bash commands are auto-approved via `.claude/settings.json`.
+The skill runs conversational setup, offers the dashboard, then delegates execution to the crash-safe headless driver described by `program.md`.
 
-`program.md` remains the source of truth for the loop's instructions; both the `/autoeval` skill and the headless `run_loop.py` driver implement the same spec.
+`tools/run_loop.py` is the executable source of truth for state transitions. `program.md` is the agent-facing runbook that deliberately delegates to it, preventing two loop implementations from drifting.
 
 ### Watch scores in real time
 
@@ -191,8 +191,9 @@ The optimisation loop doesn't just look at score numbers. For each iteration, it
 2. **Reads the actual sample text** that scored poorly, so it can see the concrete failure.
 3. **Makes one targeted change** based on that specific failure, not a guess from numbers.
 4. **Validates the returned skill** hasn't been truncated or corrupted (checks frontmatter, section headers).
-5. **Decides with statistics, not vibes**: each prompt runs `replicates_per_prompt` completions (default 3), and KEEP/DISCARD is decided by a paired bootstrap confidence interval (default 95%) over the per-prompt score deltas, not a bare score comparison. Run `python3 tools/run_loop.py --measure-noise 3` to see your own noise floor.
-6. **Checks for overfitting**: a portion of your prompts (default 30%) are held out from training. A KEEP on the training prompts is only accepted if it doesn't regress on the holdout set.
+5. **Models both sources of noise**: each prompt runs `replicates_per_prompt` completions, and a hierarchical bootstrap resamples prompts plus replicate scores. Runs with fewer than eight shared training prompts explicitly degrade to a threshold rule rather than claiming significance.
+6. **Controls repeated testing**: an alpha-spending schedule keeps the cumulative false-positive budget bounded across resumed campaigns.
+7. **Separates selection from final evidence**: validation prompts gate KEEPs; a distinct final-test split is scored at baseline and once at completion, never used by the optimiser.
 
 This means the headless mode (`run_loop.py`) is just as effective as the Claude Code mode. Both see the same signal.
 
@@ -222,7 +223,7 @@ Each prompt needs:
 - `genre` — category (used for context in evaluation)
 - `prompt` — the actual task the LLM will perform using your skill
 
-Aim for 5-10 prompts that cover different aspects of your skill. More prompts = more reliable scores, but each one costs an LLM call per iteration.
+Use about 30 prompts spanning realistic cases, constraints, and edge conditions. The generated default allocates 30% to validation and 20% to the untouched final test, leaving 15 training prompts. Smaller suites still run, but fewer than eight training prompts use degraded threshold mode.
 
 ---
 
@@ -322,15 +323,16 @@ Other dimensions (quality, natural_voice, etc.) are still evaluated blind. Set t
 
 ### Noise-aware decisions
 
-The optimiser doesn't compare bare score deltas. Each experiment runs `replicates_per_prompt` completions per prompt (default 3), and KEEP/DISCARD is decided by a per-prompt paired bootstrap confidence interval at `accept_confidence` (default 0.95) — see `tools/decision.py`.
+The optimiser doesn't compare bare score deltas. Each experiment runs `replicates_per_prompt` completions per prompt, then hierarchically resamples prompts and replicates. An alpha-spending schedule tightens the effective confidence as a campaign accumulates candidate tests, including after resume.
 
 ```yaml
 replicates_per_prompt: 3   # completions per prompt per experiment
-accept_rule: paired        # noise-aware decision (default); "simple" preserves the legacy min_improvement threshold
-accept_confidence: 0.95    # confidence level for the paired bootstrap CI
+accept_rule: paired        # hierarchical decision (default); "simple" preserves the legacy threshold
+accept_confidence: 0.95    # base confidence before repeated-testing correction
+sequential_correction: true
 ```
 
-A held-out slice of prompts (`holdout_fraction`, default 0.3) guards against overfitting: a KEEP on the training prompts is only accepted if it doesn't regress on the holdout set. Run `python3 tools/run_loop.py --measure-noise 3` to measure your own score noise floor before tuning these.
+The generated configuration uses a validation slice (`holdout_fraction: 0.3`) to gate prospective KEEPs and an untouched final slice (`final_test_fraction: 0.2`) that is never used for selection. Run `python3 tools/run_loop.py --measure-noise 3` to inspect your own score variability.
 
 ### Convergence detection
 
@@ -350,7 +352,7 @@ Set a budget limit on estimated API spend:
 max_cost_usd: 5.00   # stop when estimated cost exceeds $5
 ```
 
-Cost is tracked accurately across all subprocesses (generation, evaluation, and the modifier), not just the modifier. Set to `0` for unlimited (default).
+Calls that return usage metadata are recorded with their serving model and priced independently across generation, evaluation, and modification. The loop avoids starting another iteration when its projected cost would cross the cap. Unknown model pricing is reported as incomplete and prevents startup when a cap is configured. Actual provider billing and a first iteration without cost history can still differ from the estimate. Set `0` for unlimited.
 
 ### Parallel execution
 
@@ -380,11 +382,12 @@ cp examples/github-actions/optimise.yml .github/workflows/optimise.yml
 ```
 
 Then:
-1. Push to GitHub
-2. Go to **Settings > Secrets > Actions** and add a secret called `LLM_API_KEY` with your API key
-3. The workflow runs daily at 2am UTC (or trigger it manually from the Actions tab)
+1. Force-add and commit the non-secret configuration: `git add -f config.yaml`
+2. Push to GitHub
+3. Go to **Settings > Secrets > Actions** and add a secret called `LLM_API_KEY` with your API key
+4. The workflow runs daily at 2am UTC (or trigger it manually from the Actions tab)
 
-Each run checks out the repo, runs N iterations, and commits the updated `SKILL.md.best` and `results.tsv`.
+Each run checks out the repo, runs N iterations, and force-adds the ignored run artefacts needed for crash-safe resumption. The non-secret `config.yaml` must also be committed explicitly; the example guide shows the command.
 
 See `examples/github-actions/README.md` for full setup instructions and schedule customisation.
 
@@ -418,7 +421,7 @@ Analysing weaknesses and modifying skill...
 Change: Added "Keep emails under 200 words" rule
 Running exp_001 (3 replicates/prompt)...
 COMPOSITE SCORE: 0.7185
-KEEP — paired bootstrap CI excludes zero at 95% confidence (0.6420 → 0.7185); holdout non-regression confirmed
+KEEP — hierarchical bootstrap CI excludes zero at corrected confidence; validation non-regression confirmed
 ```
 
 ```
@@ -464,7 +467,7 @@ autoevaluation/
 ├── start.sh                  # Zero-friction entry point
 ├── config.yaml               # All settings (generated by setup.py or --skill flag)
 ├── config.template.yaml      # Reference config with all options documented
-├── program.md                # Loop instructions for Claude Code
+├── program.md                # Agent runbook delegating to the headless driver
 ├── SKILL.md                  # The skill being optimised (your instructions)
 ├── SKILL.md.best             # Current best version (auto-managed)
 ├── results.tsv               # Full experiment history
@@ -483,7 +486,7 @@ autoevaluation/
 │   ├── eval_deterministic.py # Rule-based metrics (optional, customisable)
 │   ├── eval_llm_judge.py     # LLM-as-judge metrics
 │   ├── score_aggregator.py   # Weighted composite scoring
-│   ├── decision.py           # Noise-aware KEEP/DISCARD (paired bootstrap CI + holdout check)
+│   ├── decision.py           # Hierarchical bootstrap, repeated-test correction, validation gate
 │   ├── results_io.py         # results.tsv header-based read/update (CLI + library)
 │   ├── run_loop.py           # Standalone loop driver (headless)
 │   └── dashboard_server.py   # Live score dashboard

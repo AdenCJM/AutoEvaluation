@@ -48,5 +48,25 @@
     "id": "documentation_howto",
     "genre": "technical documentation",
     "prompt": "Write a 400-500 word how-to guide for setting up a new development environment, including prerequisites, installation steps, and verification."
-  }
+  },
+  {"id": "customer_apology", "genre": "customer support", "prompt": "Write a 180-word reply to a customer whose billing error has happened twice. Apologise, explain the fix, and give a clear next step."},
+  {"id": "pricing_announcement", "genre": "customer announcement", "prompt": "Write a 250-word announcement explaining a pricing increase, who it affects, and when it starts."},
+  {"id": "manager_feedback", "genre": "performance feedback", "prompt": "Write direct but kind feedback to a colleague whose weekly reports are consistently late and vague."},
+  {"id": "security_explainer", "genre": "mixed-audience explainer", "prompt": "Explain a mandatory multi-factor authentication rollout to engineers and non-technical staff in one 300-word message."},
+  {"id": "release_notes", "genre": "release notes", "prompt": "Write release notes for a feature that adds CSV export, saved filters, and two known limitations."},
+  {"id": "board_update", "genre": "board update", "prompt": "Write a 350-word board update: revenue is ahead of plan, enterprise pipeline is weak, and hiring is paused."},
+  {"id": "project_cancellation", "genre": "sensitive internal communication", "prompt": "Tell a project team that their initiative has been cancelled after four months. Explain why without blaming individuals."},
+  {"id": "data_commentary", "genre": "analysis", "prompt": "Explain what matters in a chart showing sales up 12%, gross margin down 4%, and product returns up 9%."},
+  {"id": "faq_beta", "genre": "FAQ", "prompt": "Write six concise FAQ answers for a beta feature that is free, invite-only, and may lose saved drafts."},
+  {"id": "meeting_decisions", "genre": "meeting summary", "prompt": "Turn these notes into decisions, owners, and open questions: launch slips Friday; Maya owns comms; API bug unresolved; legal approved terms."},
+  {"id": "short_delay", "genre": "constrained update", "prompt": "Explain a two-week delivery delay in no more than 45 words. Include the cause and new date."},
+  {"id": "three_bullets", "genre": "constrained project update", "prompt": "Write a useful project update using exactly three bullet points and no introduction."},
+  {"id": "sales_followup", "genre": "sales email", "prompt": "Write a 160-word follow-up to a prospect who liked the demo but is worried about migration effort."},
+  {"id": "job_rejection", "genre": "recruiting email", "prompt": "Write a respectful rejection email to a strong candidate after the final interview, with specific but brief feedback."},
+  {"id": "contrarian_memo", "genre": "internal memo", "prompt": "Argue against adding a weekly status meeting. Acknowledge the best argument for it and offer an alternative."},
+  {"id": "beginner_tutorial", "genre": "beginner tutorial", "prompt": "Teach a new developer how to diagnose a failed deployment without assuming they know containers or orchestration."},
+  {"id": "product_limitation", "genre": "product copy", "prompt": "Describe an AI search feature honestly. It is fast and useful, but it can miss recent documents and cannot search images."},
+  {"id": "ambiguous_request", "genre": "boundary case", "prompt": "A manager asks for 'a better update' without context. Draft a useful response, stating reasonable assumptions rather than asking questions."},
+  {"id": "creative_scene", "genre": "creative writing", "prompt": "Write a 300-word scene in which two engineers discover that the monitoring dashboard has been showing yesterday's data."},
+  {"id": "plain_rewrite", "genre": "editing", "prompt": "Rewrite this in plain English without losing meaning: 'We leveraged cross-functional synergies to operationalise strategic outcomes going forward.'"}
 ]

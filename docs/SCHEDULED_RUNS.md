@@ -1,6 +1,6 @@
 # Running AutoEvaluation unattended
 
-This is a practical guide to the three ways to run the optimisation loop without babysitting it, plus a nightly regression sweep option. All three eventually run the same loop described in `program.md`; they differ in where they run and what guarantees you get.
+This is a practical guide to the three ways to run the optimisation loop without babysitting it, plus a nightly regression sweep option. All supported paths delegate to `tools/run_loop.py`; they differ in where they run and how state is persisted.
 
 | Option | Where it runs | Minimum interval | Local file access | Best for |
 |---|---|---|---|---|
@@ -10,7 +10,7 @@ This is a practical guide to the three ways to run the optimisation loop without
 
 ## 1. `/loop` in Claude Code - session-scoped recurring runs
 
-`/loop` fires a prompt or slash command on a recurring interval, but only while a Claude Code session is open (or backgrounded). It is the lightest-weight option and the closest match to how `program.md` already runs conversationally.
+`/loop` fires a prompt or slash command on a recurring interval, but only while a Claude Code session is open (or backgrounded). The `/autoeval` skill ultimately delegates to the same locked headless driver.
 
 ```
 /loop 30m /autoeval
@@ -34,19 +34,19 @@ A Routine is a saved Claude Code session (prompt + repo + connectors) that Anthr
 Example - a nightly 10-iteration run:
 
 ```
-/schedule nightly at 1am, run: cd AutoEvaluation && python3 tools/run_loop.py --iterations 10, then commit results.tsv and SKILL.md.best to a claude/nightly-autoeval branch and push
+/schedule nightly at 1am, run: cd AutoEvaluation && python3 tools/run_loop.py --iterations 10 --skip-final-test, then force-add the generated run artefacts, commit them to a claude/nightly-autoeval branch, and push
 ```
 
 Or, staying closer to the conversational loop:
 
 ```
-/schedule nightly at 1am, in the AutoEvaluation repo, follow program.md and run 10 optimisation iterations, then commit results.tsv and SKILL.md.best
+/schedule nightly at 1am, in the AutoEvaluation repo, run 10 optimisation iterations without consuming the final-test split, then force-add and commit the generated run artefacts
 ```
 
 Characteristics:
 
 - **1-hour minimum interval** (vs `/loop`'s 1 minute) - not suited to fast, tight iteration cadences, but fine for "once a night."
-- **Fresh repo clone every run**, from the default branch. This matters for AutoEvaluation specifically: `results.tsv`, `SKILL.md.best`, `best_aggregate.json`, and `best_holdout_aggregate.json` are gitignored (see `.gitignore`), so a Routine that doesn't explicitly commit and push its results loses them the moment the run ends and the sandbox is torn down. The routine prompt must commit `results.tsv` (and ideally `SKILL.md.best`) itself.
+- **Fresh repo clone every run**, from the default branch. This matters because run state is gitignored for local use. The routine must use `git add -f` for `results.tsv`, `SKILL.md.best`, and the aggregate JSON files before committing. `config.yaml` must already be force-added once because it is non-secret configuration required by a fresh checkout.
 - **Pushes are restricted to `claude/`-prefixed branches** unless unrestricted push is explicitly enabled for the routine. Plan for the routine to push to something like `claude/nightly-autoeval` and periodically merge or review that branch, rather than expecting it to land on `main` directly.
 - **No permission prompts** - the routine runs the full session autonomously, so anything in `tools/` executes without a human in the loop. Treat `tools/` as trusted-as-is before scheduling a routine against it.
 - **Personal daily routine-run cap** applies (metered overage available with usage credits) - a nightly single run comfortably fits under this, but don't stack many routines on tight schedules without checking the cap.
@@ -61,7 +61,7 @@ If you have a server or an always-on machine, skip both Claude Code scheduling s
 
 ```cron
 # Run 10 optimisation iterations at 1am every night
-0 1 * * * cd /path/to/AutoEvaluation && /usr/bin/python3 tools/run_loop.py --iterations 10 >> logs/nightly.log 2>&1
+0 1 * * * cd /path/to/AutoEvaluation && /usr/bin/python3 tools/run_loop.py --iterations 10 --skip-final-test >> logs/nightly.log 2>&1
 ```
 
 Characteristics:
@@ -91,5 +91,5 @@ Requires an Anthropic API key (Batches API is Anthropic-specific; other provider
 
 - **Tonight, one session, my machine**: `/loop 30m /autoeval`.
 - **Every night, indefinitely, don't want my machine on**: a Routine via `/schedule`, with an explicit commit-and-push step and a plan for the API key.
-- **I have a server**: cron + `tools/run_loop.py --iterations N`. Simplest, most predictable, no caveats.
+- **I have a server**: cron + `tools/run_loop.py --iterations N --skip-final-test`, then run once without `--skip-final-test` when the campaign is finished.
 - **Any time**: pair whichever of the above you pick with a nightly `tools/batch_sweep.py` regression check to catch drift on the full prompt set at half the API cost.

@@ -15,9 +15,11 @@ Usage:
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +81,7 @@ def run_experiment(
     decision: str = "",
     prompt_set: str = "train",
     write_tsv: bool = True,
+    replace_existing: bool = False,
 ) -> dict:
     """Execute one full evaluation cycle.
 
@@ -94,8 +97,25 @@ def run_experiment(
 
     metric_names = get_all_metric_names(cfg)
 
-    samples_dir = PROJECT_ROOT / ".tmp" / "samples" / run_id
-    evals_dir = PROJECT_ROOT / ".tmp" / "evals" / run_id
+    final_samples_dir = PROJECT_ROOT / ".tmp" / "samples" / run_id
+    final_evals_dir = PROJECT_ROOT / ".tmp" / "evals" / run_id
+    existing = [p for p in (final_samples_dir, final_evals_dir) if p.exists()]
+    if existing and not replace_existing:
+        names = ", ".join(str(p.relative_to(PROJECT_ROOT)) for p in existing)
+        raise RuntimeError(
+            f"run_id {run_id!r} already has output ({names}); choose a new run id "
+            "or pass --replace-run to explicitly replace an interrupted run"
+        )
+    if replace_existing:
+        for path in existing:
+            shutil.rmtree(path)
+
+    # Work in a unique staging tree. Only a complete experiment is promoted
+    # to the canonical run directories, so partial retries cannot contaminate
+    # later scoring.
+    work_root = PROJECT_ROOT / ".tmp" / "work" / f"{run_id}-{uuid.uuid4().hex[:10]}"
+    samples_dir = work_root / "samples"
+    evals_dir = work_root / "evals"
     evals_dir.mkdir(parents=True, exist_ok=True)
 
     start_time = time.time()
@@ -196,7 +216,17 @@ def run_experiment(
         print(f"Note: {agg['judge_errors']} judge failures excluded "
               f"({agg['sample_count']}/{agg.get('samples_total', agg['sample_count'])} samples used)")
 
-    # Append to results.tsv (skipped for auxiliary runs like holdout checks)
+    # Atomically promote complete outputs before recording the TSV row.
+    final_samples_dir.parent.mkdir(parents=True, exist_ok=True)
+    final_evals_dir.parent.mkdir(parents=True, exist_ok=True)
+    samples_dir.replace(final_samples_dir)
+    evals_dir.replace(final_evals_dir)
+    try:
+        work_root.rmdir()
+    except OSError:
+        pass
+
+    # Append to results.tsv (skipped for auxiliary runs like validation checks)
     if write_tsv:
         tsv_path = PROJECT_ROOT / results_tsv
         metrics = agg["metric_averages"]
@@ -229,20 +259,27 @@ def main():
     parser.add_argument("--run-id", required=True, help="Unique identifier for this run")
     parser.add_argument("--description", default="", help="One-line description of what changed")
     parser.add_argument("--decision", default="", help="KEEP, DISCARD, or BASELINE")
-    parser.add_argument("--prompt-set", choices=["all", "train", "holdout"], default="train",
+    parser.add_argument("--prompt-set", choices=["all", "train", "holdout", "final_test"], default="train",
                         help="Prompt split to evaluate (default: train)")
     parser.add_argument("--no-tsv", action="store_true",
                         help="Auxiliary run: don't append a row to results.tsv")
+    parser.add_argument("--replace-run", action="store_true",
+                        help="Explicitly replace existing output for this run id")
     args = parser.parse_args()
 
-    run_experiment(
-        run_id=_validate_run_id(args.run_id),
-        cfg=cfg,
-        description=sanitise_description(args.description),
-        decision=args.decision,
-        prompt_set=args.prompt_set,
-        write_tsv=not args.no_tsv,
-    )
+    try:
+        run_experiment(
+            run_id=_validate_run_id(args.run_id),
+            cfg=cfg,
+            description=sanitise_description(args.description),
+            decision=args.decision,
+            prompt_set=args.prompt_set,
+            write_tsv=not args.no_tsv,
+            replace_existing=args.replace_run,
+        )
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

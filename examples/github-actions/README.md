@@ -10,7 +10,12 @@ Run AutoEvaluation on a schedule so your skill improves in the background.
    cp examples/github-actions/optimise.yml .github/workflows/optimise.yml
    ```
 
-2. Push to GitHub
+2. Commit the non-secret config so a fresh runner can reproduce the setup:
+   ```bash
+   git add -f config.yaml
+   git commit -m "chore: add AutoEvaluation configuration"
+   git push
+   ```
 
 3. Add your API key as a repository secret:
    - Go to **Settings > Secrets > Actions**
@@ -40,5 +45,7 @@ on:
 
 ## Requirements
 
-- `config.yaml` must exist in the repo root (run `python3 setup.py` first)
+- `config.yaml` must exist in the repo root and be force-added because the
+  local-first default `.gitignore` excludes it. It contains model and rubric
+  settings, never API keys.
 - `LLM_API_KEY` secret must be set in your repo settings
