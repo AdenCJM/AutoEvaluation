@@ -2,11 +2,11 @@
 
 **Evals that fix themselves.**
 
-Give it a prompt, a set of test scenarios, and a scoring rubric. It runs autonomously: generate outputs, score them, read the judge's reasoning, find the weakest metric, rewrite the prompt to fix it, re-score, keep or revert. Hill-climbing on prompt engineering, fully hands-off.
+Give it a system prompt or agent instruction file, a set of realistic scenarios, and a scoring rubric. It generates outputs, scores them, studies the failures, rewrites one targeted part, validates the result, and keeps or reverts the change.
 
 I pointed an earlier version at a writing style guide overnight. It made 20 attempts, kept 2, and improved its selected composite score from 0.9508 to 0.9692. The useful difference is the interface: AutoEvaluation works directly on plain Markdown instruction files, with no application DSL required. That historical run demonstrates the workflow; the included benchmark protocol defines the stronger evidence required for current statistical claims.
 
-Point it at any LLM instruction set. Go to bed. Wake up with a measurably better prompt.
+It is designed for AI engineers and prompt owners who need an auditable way to improve instruction files across many representative tasks—not for one-off prompt rewriting.
 
 ## Documentation
 
@@ -64,11 +64,9 @@ The full experiment history is in `examples/writing-style/sample-results.tsv`. T
 - Python 3.10+
 - An API key for your preferred LLM provider (Gemini, OpenAI, or Anthropic)
 
-### Three ways to run it
+### The recommended path
 
-1. **`/autoeval` in Claude Code (recommended)** — conversational setup, then a live dashboard, then autopilot. `start.sh` installs the skill automatically into `~/.claude/skills/`, so once you've run it once, just type `/autoeval` in Claude Code inside the project.
-2. **`python3 setup.py` + `python3 tools/run_loop.py`** — the interactive wizard followed by the headless driver. No Claude Code dependency.
-3. **`./start.sh`** — auto-detects your environment (Claude Code available or not) and picks the right path for you.
+Use `./start.sh`. It configures the project when needed, shows a bounded campaign plan, starts the dashboard, and runs or resumes the active campaign. Claude Code, Codex, and low-level Python entry points remain available for advanced use, but they all delegate to the same engine.
 
 Want it running unattended overnight, on a schedule, or on a server? See [Scheduled & unattended runs](docs/SCHEDULED_RUNS.md).
 
@@ -79,11 +77,16 @@ See the [Getting Started guide](docs/GETTING_STARTED.md) for a full walkthrough,
 ```bash
 git clone https://github.com/AdenCJM/AutoEvaluation.git
 cd AutoEvaluation
-echo "GEMINI_API_KEY=your-key" > .env
 ./start.sh
 ```
 
-`start.sh` handles everything: checks your Python version, creates a virtual environment, installs only the provider SDK you need (not all three), validates your API key, installs the `/autoeval` skill, runs setup if needed, and starts the optimisation loop. If anything is wrong, it tells you immediately.
+`start.sh` checks Python, creates a virtual environment, runs setup, collects the API key through masked input, validates the configuration, starts the dashboard, and launches the active campaign.
+
+Want to inspect the product without an API key or paid calls?
+
+```bash
+python3 autoeval.py demo --open
+```
 
 ### Try the included example
 
@@ -102,7 +105,7 @@ cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
 
 Already have a skill file you want to optimise? Two options:
 
-**Quick (no prompts, all defaults):**
+**Quick, with AI-generated evaluation scenarios:**
 ```bash
 echo "GEMINI_API_KEY=your-key" > .env
 python3 setup.py --defaults --skill-file /path/to/your/SKILL.md --generate-prompts
@@ -111,12 +114,13 @@ python3 setup.py --defaults --skill-file /path/to/your/SKILL.md --generate-promp
 
 This validates your API key, uses AI to generate test prompts from your skill file, applies sensible defaults (3 evaluation dimensions, 10 iterations), and you're running.
 
-**Guided (interactive wizard):**
+**Unified CLI:**
 ```bash
-python3 tools/run_loop.py --skill path/to/your/SKILL.md --provider gemini --iterations 10
+python3 autoeval.py init --defaults --skill-file /path/to/your/SKILL.md --generate-prompts
+python3 autoeval.py run --iterations 10
 ```
 
-This auto-generates `config.yaml` with sensible defaults and starts optimising immediately.
+This generates a validated configuration with safe defaults, then starts a resumable campaign.
 
 ### Setup wizard
 
@@ -129,9 +133,9 @@ The wizard walks you through:
 2. **Your skill** — paste or describe the instructions you want to optimise
 3. **Test prompts** — AI generates prompts from your skill description, or enter manually
 4. **Eval rubric** — set 2-5 quality dimensions (or use the defaults)
-5. **Run duration** — max iterations, max hours, or unlimited
+5. **Run duration** — max iterations, max hours, and a default $10 safety cap
 
-It generates: `config.yaml`, `SKILL.md`, `prompts/prompts.json`, `.env`, and `.claude/settings.json`.
+It audits prompt coverage, lets you edit or regenerate individual scenarios, reviews rubric observability, and shows estimated calls, cost range, model choices, split sizes, and the hard cost cap before writing `config.yaml`, `SKILL.md`, `prompts/prompts.json`, `.env`, and `.claude/settings.json`.
 
 **Skip all prompts:**
 
@@ -181,6 +185,19 @@ python3 tools/dashboard_server.py
 
 Then open http://localhost:8050 in your browser.
 
+### Campaign lifecycle
+
+Ordinary runs never consume the untouched final test. Continue or inspect the active campaign, then explicitly finalize it once:
+
+```bash
+python3 autoeval.py run --iterations 5   # run or resume a segment
+python3 autoeval.py status               # inspect campaign state
+python3 autoeval.py finalize             # one-time untouched final test
+python3 autoeval.py new my-next-campaign # archive and start again
+```
+
+Archived campaign evidence is stored under `campaigns/` and remains separate from the next campaign.
+
 ---
 
 ## How the optimiser thinks
@@ -195,7 +212,7 @@ The optimisation loop doesn't just look at score numbers. For each iteration, it
 6. **Controls repeated testing**: an alpha-spending schedule keeps the cumulative false-positive budget bounded across resumed campaigns.
 7. **Separates selection from final evidence**: validation prompts gate KEEPs; a distinct final-test split is scored at baseline and once at completion, never used by the optimiser.
 
-This means the headless mode (`run_loop.py`) is just as effective as the Claude Code mode. Both see the same signal.
+This means the unified CLI and Claude Code mode are equally capable. Both delegate to the same deterministic driver and see the same signal.
 
 ---
 
@@ -262,8 +279,8 @@ To add a custom provider, edit `tools/model_client.py`. It's a single file with 
 Control how long the loop runs via CLI flags or `config.yaml`:
 
 ```bash
-python3 tools/run_loop.py --iterations 20
-python3 tools/run_loop.py --hours 2.5
+python3 autoeval.py run --iterations 20
+python3 autoeval.py run --hours 2.5
 ```
 
 Or in `config.yaml`:
@@ -362,15 +379,9 @@ Speed up generation and evaluation by running multiple LLM calls concurrently:
 max_concurrent: 4   # run 4 API calls in parallel
 ```
 
-Partial failures are handled gracefully. If 1 of 10 calls fails, the other 9 still count. Set to `1` for serial execution (default).
+Partial failures are handled gracefully. If 1 of 10 calls fails, the other 9 still count. Set to `1` for serial execution when provider rate limits are tight.
 
 ---
-
-## Subscription mode (experimental)
-
-`.claude/workflows/autoeval-eval.js` runs one evaluation pass entirely through Claude Code subagents — generation and judging both happen as subagent calls inside the session, needing no provider API key at all. Invoke it by asking Claude Code to "run the autoeval-eval workflow".
-
-This is experimental. The scores come from whatever model is powering the current Claude Code session, so they are **not comparable** with scores produced by the API-provider path (`generate_samples.py` / `eval_llm_judge.py` against `config.yaml`'s configured provider). Treat it as a no-API-key way to sanity-check a `SKILL.md` change, not as a substitute for the main loop's scoring.
 
 ## Always-on mode (GitHub Actions)
 
@@ -463,7 +474,8 @@ Best score: 0.7510
 
 ```
 autoevaluation/
-├── setup.py                  # Setup wizard (also accepts --skill-file flags)
+├── autoeval.py               # Unified run/status/finalize/new/demo CLI
+├── setup.py                  # Setup wizard and evaluation-plan workbench
 ├── start.sh                  # Zero-friction entry point
 ├── config.yaml               # All settings (generated by setup.py or --skill flag)
 ├── config.template.yaml      # Reference config with all options documented
@@ -473,6 +485,7 @@ autoevaluation/
 ├── results.tsv               # Full experiment history
 ├── best_aggregate.json       # Best run's per-prompt scores, for paired comparison (gitignored)
 ├── best_holdout_aggregate.json  # Best run's holdout-set scores (gitignored)
+├── campaigns/               # Archived campaign evidence (gitignored)
 ├── .env                      # API key (git-ignored)
 ├── .env.example              # Template showing required keys
 ├── .claude/settings.json     # Auto-approve rules for Claude Code (gitignored)
@@ -489,9 +502,12 @@ autoevaluation/
 │   ├── decision.py           # Hierarchical bootstrap, repeated-test correction, validation gate
 │   ├── results_io.py         # results.tsv header-based read/update (CLI + library)
 │   ├── run_loop.py           # Standalone loop driver (headless)
+│   ├── campaigns.py          # Campaign archive and reset lifecycle
+│   ├── run_benchmark.py      # Independent benchmark campaign harness
 │   └── dashboard_server.py   # Live score dashboard
 ├── tests/
-│   └── test_smoke.py         # 89 tests (import, config, judge parsing, aggregation, decision logic, loop logic)
+│   ├── test_smoke.py         # Core engine tests
+│   └── test_product_experience.py # Lifecycle, setup, dashboard, and CLI tests
 ├── examples/
 │   ├── writing-style/        # Full example: anti-AI writing style
 │   └── github-actions/       # GitHub Actions workflow (opt-in)

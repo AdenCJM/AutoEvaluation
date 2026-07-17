@@ -34,7 +34,7 @@ A Routine is a saved Claude Code session (prompt + repo + connectors) that Anthr
 Example - a nightly 10-iteration run:
 
 ```
-/schedule nightly at 1am, run: cd AutoEvaluation && python3 tools/run_loop.py --iterations 10 --skip-final-test, then force-add the generated run artefacts, commit them to a claude/nightly-autoeval branch, and push
+/schedule nightly at 1am, run: cd AutoEvaluation && python3 autoeval.py run --iterations 10, then force-add the generated run artefacts, commit them to a claude/nightly-autoeval branch, and push
 ```
 
 Or, staying closer to the conversational loop:
@@ -61,7 +61,7 @@ If you have a server or an always-on machine, skip both Claude Code scheduling s
 
 ```cron
 # Run 10 optimisation iterations at 1am every night
-0 1 * * * cd /path/to/AutoEvaluation && /usr/bin/python3 tools/run_loop.py --iterations 10 --skip-final-test >> logs/nightly.log 2>&1
+0 1 * * * cd /path/to/AutoEvaluation && /usr/bin/python3 autoeval.py run --iterations 10 >> logs/nightly.log 2>&1
 ```
 
 Characteristics:
@@ -91,5 +91,5 @@ Requires an Anthropic API key (Batches API is Anthropic-specific; other provider
 
 - **Tonight, one session, my machine**: `/loop 30m /autoeval`.
 - **Every night, indefinitely, don't want my machine on**: a Routine via `/schedule`, with an explicit commit-and-push step and a plan for the API key.
-- **I have a server**: cron + `tools/run_loop.py --iterations N --skip-final-test`, then run once without `--skip-final-test` when the campaign is finished.
+- **I have a server**: cron + `python3 autoeval.py run --iterations N`, then explicitly run `python3 autoeval.py finalize` once when the campaign is finished.
 - **Any time**: pair whichever of the above you pick with a nightly `tools/batch_sweep.py` regression check to catch drift on the full prompt set at half the API cost.

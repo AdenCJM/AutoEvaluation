@@ -110,7 +110,7 @@ LLM judges have variance. A score of 0.7214 vs 0.7205 might be random noise, not
 2. **Hierarchical bootstrap decision** (`accept_rule: paired`, default) — `tools/decision.py` resamples prompt pairs and replicate scores. KEEP requires the corrected confidence interval to exclude zero. Fewer than eight shared training prompts explicitly fall back to conservative threshold mode.
 3. **Repeated-testing correction** (`sequential_correction: true`) — candidate test `k` spends `alpha / (k × (k + 1))`. The telescoping schedule bounds the cumulative false-positive budget even when a campaign is resumed without a known final iteration count.
 4. **Validation gate** (`holdout_fraction`, default 0.3) — a candidate that passes training must not regress on validation prompts. Because this split participates in selection, it is deliberately called validation rather than final evidence.
-5. **Untouched final test** (`final_test_fraction`, generated default 0.2) — scored at baseline and once after the loop. It never affects KEEP/DISCARD decisions.
+5. **Untouched final test** (`final_test_fraction`, generated default 0.2) — baseline evidence is captured at campaign start and the best is scored once on explicit finalization. It never affects KEEP/DISCARD decisions.
 
 Before tuning any of these, run `python3 tools/run_loop.py --measure-noise 3` to see how much your own judge/prompt setup varies with no change at all.
 
@@ -148,8 +148,8 @@ Why?
 - Evaluation is parallelisable (judge 5 samples in parallel instead of sequentially)
 
 Trade-off:
-- **Serial (default, max_concurrent=1)**: Cheaper, simpler
-- **Parallel (max_concurrent=4)**: 4× faster wall-clock time, higher API costs
+- **Serial (`max_concurrent: 1`)**: Simpler and gentler on provider rate limits
+- **Parallel (generated default, `max_concurrent: 4`)**: Lower wall-clock time for the same planned calls
 
 ## File Ownership
 
@@ -170,6 +170,22 @@ The evaluation inputs remain fixed during a run; the loop also writes explicit s
 | `.tmp/samples/` | Write (intermediate) | Disposable: samples, logs, intermediate results |
 
 This design supports **auditability**, not bit-for-bit reproducibility. LLM outputs remain stochastic and provider behaviour can change. Pin model snapshots where available, retain all aggregates, and repeat campaigns when publishing evidence.
+
+## Campaign Lifecycle
+
+The product separates a resumable optimisation campaign from a single process invocation:
+
+```text
+new/not started → active → ready to finalize → finalized → archived
+                       ↘ run another segment ↗
+```
+
+- `python3 autoeval.py run` creates or resumes the active campaign without touching the final-test split.
+- `.tmp/campaign.json` records the campaign identity, status, timestamps, and finalization state.
+- `python3 autoeval.py finalize` performs the one-time untouched audit and closes the campaign to further tuning.
+- `python3 autoeval.py new` copies the evidence bundle to `campaigns/<id>/`, clears active runtime artefacts, and seeds the next campaign from `SKILL.md.best` by default.
+
+This boundary prevents a user from inspecting final-test feedback and then quietly continuing the same campaign. Repeated benchmark campaigns run in isolated workspaces through `tools/run_benchmark.py`.
 
 ## Cost Estimation
 
@@ -210,7 +226,7 @@ For Phase 1, the single-best approach is justified. If Phase 1 experiments show 
 
 `program.md` is an agent-facing runbook. It intentionally delegates the complete state machine to `tools/run_loop.py` rather than duplicating mutation logic in prose.
 
-The `/autoeval` skill is the Claude Code entry point. It handles conversational setup and dashboard orientation, then launches `tools/run_loop.py`, which owns locking, recovery, evaluation, decisions, and finalisation without a Claude Code dependency.
+The unified `autoeval.py` CLI is the primary product entry point. The `/autoeval` skill adds a conversational Claude Code surface. Both launch `tools/run_loop.py`, which owns locking, recovery, evaluation, decisions, and finalisation without a Claude Code dependency.
 
 Why a separate spec file? Because:
 - The loop logic is separate from the system logic

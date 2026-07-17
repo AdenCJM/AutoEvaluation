@@ -54,9 +54,9 @@ min_improvement: 0.01      # only used by accept_rule: simple — run
 # Control how long the optimisation loop runs. Set one or both.
 # If both are set, whichever limit is hit first stops the loop.
 # Set to 0 or omit to run indefinitely (until manually stopped).
-max_iterations: 0     # stop after N experiments (0 = unlimited)
+max_iterations: 10    # safe generated default; 0 = unlimited
 max_hours: 0          # stop after N hours (0 = unlimited, accepts decimals e.g. 1.5)
-max_cost_usd: 0       # projected hard guard (0 = unlimited); requires known
+max_cost_usd: 10      # safe generated cost guard; 0 = unlimited; requires known
                       # pricing for both primary and judge models
 convergence_window: 0 # stop after N iterations with no improvement (0 = disabled)
 

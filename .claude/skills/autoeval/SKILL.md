@@ -248,7 +248,7 @@ Run the optimisation loop headless. **Do not pause for input** — just run and 
 
 Execute the headless loop:
 ```bash
-python3 tools/run_loop.py
+python3 autoeval.py run
 ```
 
 This will:
@@ -265,7 +265,7 @@ This will:
 
 ### Step 3.2: Post-run
 
-After `run_loop.py` finishes, read `.tmp/run-summary.md` if it exists and present the results:
+After the requested run segment finishes, present the active-campaign results. When the user is genuinely finished, run `python3 autoeval.py finalize`, then read `.tmp/run-summary.md` and present the final-test result:
 
 > **Optimisation complete!**
 >

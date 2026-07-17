@@ -53,9 +53,9 @@ jobs:
       - name: Run optimisation loop
         run: |
           ITERS=${{ github.event.inputs.iterations || '10' }}
-          # Scheduled segments preserve the untouched final test. Run once
-          # without --skip-final-test when the campaign is genuinely finished.
-          python3 tools/run_loop.py --iterations "$ITERS" --skip-final-test
+          # Scheduled segments preserve the untouched final test. Finalize the
+          # campaign explicitly with `python3 autoeval.py finalize` when done.
+          python3 autoeval.py run --iterations "$ITERS"
 
       - name: Commit results
         run: |

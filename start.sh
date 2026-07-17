@@ -167,16 +167,28 @@ echo ""
 # Wait a moment for the server to start
 sleep 1
 
+open_dashboard() {
+  if command -v open &>/dev/null; then
+    open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+  elif command -v xdg-open &>/dev/null; then
+    xdg-open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+  elif command -v cmd.exe &>/dev/null; then
+    cmd.exe /c start "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+  else
+    echo "  Open http://localhost:${DASHBOARD_PORT} in your browser."
+  fi
+}
+
 # Open browser if --open flag is passed, or ask interactively
 if [[ "${1:-}" == "--open" ]] || [[ "${1:-}" == "-o" ]]; then
   echo "  Opening dashboard in browser..."
-  open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+  open_dashboard
 elif [ -t 0 ]; then
   # Interactive terminal — ask the user
   read -p "  Open dashboard in browser? (y/n) [y]: " OPEN_BROWSER
   OPEN_BROWSER="${OPEN_BROWSER:-y}"
   if [[ "$OPEN_BROWSER" == "y" ]] || [[ "$OPEN_BROWSER" == "Y" ]]; then
-    open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+    open_dashboard
   fi
 fi
 echo ""
@@ -198,4 +210,4 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 tools/run_loop.py
+python3 autoeval.py run

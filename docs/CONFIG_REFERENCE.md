@@ -183,7 +183,7 @@ The loop stops when **any** of these limits is hit (whichever comes first).
 
 ### `max_iterations`
 **Type:** `integer` (≥ 0)  
-**Default:** `0` (unlimited)  
+**Generated default:** `10`
 **What it does:** Maximum number of experiments to run.
 
 **Examples:**
@@ -196,7 +196,7 @@ max_iterations: 0     # No limit, run forever (until time or cost limit)
 
 ### `max_hours`
 **Type:** `float` (≥ 0)  
-**Default:** `0` (unlimited)  
+**Generated default:** `0` (unlimited; normally paired with iteration and cost limits)
 **What it does:** Maximum time to run (in hours). Accepts decimals.
 
 **Examples:**
@@ -210,7 +210,7 @@ max_hours: 0          # No limit
 
 ### `max_cost_usd`
 **Type:** `float` (≥ 0)  
-**Default:** `0` (unlimited)  
+**Generated default:** `10`
 **What it does:** Stop when estimated API spend exceeds this amount (USD).
 
 Cost is tracked from token counts and standard provider list pricing, not actual billing. Time-limited promotions are intentionally excluded so guards remain conservative. If `max_cost_usd` is non-zero, the loop refuses to start when either the generation/modifier model or judge model lacks a pricing entry.
@@ -311,13 +311,13 @@ holdout_fraction: 0     # disabled — no overfitting guard
 
 ### `final_test_fraction`
 
-**What it does:** Reserves an untouched final-test slice. It is scored for the baseline and once after the loop, but never affects candidate selection.
+**What it does:** Reserves an untouched final-test slice. Its baseline reference is captured at campaign start and the confirmed best is scored only when you explicitly run `python3 autoeval.py finalize`. It never affects candidate selection.
 
 ```yaml
 final_test_fraction: 0.2
 ```
 
-You can explicitly assign prompts with `"split": "final_test"`. If you inspect the result and then continue optimising, create a new final-test set before making another publishable claim.
+You can explicitly assign prompts with `"split": "final_test"`. Finalized campaigns are closed to further tuning; use `python3 autoeval.py new` to archive the evidence and begin a fresh campaign.
 
 ### `sequential_correction`
 
@@ -352,13 +352,14 @@ This re-runs the same baseline configuration 3 times (no skill changes) and repo
 
 ### `max_concurrent`
 **Type:** `integer` (≥ 1)  
-**Default:** `1`  
+**Generated default:** `4`
+
 **What it does:** How many LLM API calls to run in parallel.
 
 **Examples:**
 ```yaml
-max_concurrent: 1     # Serial (default): slower, cheaper
-max_concurrent: 4     # 4 parallel calls: 4× faster wall-clock, higher cost
+max_concurrent: 1     # Serial: slower, gentler on provider rate limits
+max_concurrent: 4     # Generated default: lower wall-clock time
 ```
 
 **How it works:**
@@ -372,7 +373,7 @@ Same logic for evaluation.
 **Cost:** Parallelism doesn't change total API calls, just how fast they run. 4 concurrent = same cost, much faster wall-clock time.
 
 **Trade-off:**
-- **1 (serial, default):** Simpler, safer (if one call fails, easier to debug), fine for overnight runs
+- **1 (serial):** Simpler, easier to debug, and gentler on rate limits
 - **4 (parallel):** 4× faster iteration time, same cost, better for interactive use
 
 ---

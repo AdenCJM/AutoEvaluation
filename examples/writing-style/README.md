@@ -25,6 +25,6 @@ cp examples/writing-style/prompts.json prompts/prompts.json
 cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
 cp examples/writing-style/config.yaml config.yaml
 # Then edit .env with your API key and run:
-#   python3 tools/run_loop.py
+#   python3 autoeval.py run
 # Or with Claude Code: claude -p program.md
 ```

@@ -10,6 +10,8 @@ best_aggregate.json
 best_holdout_aggregate.json
 baseline_final_test_aggregate.json
 final_test_aggregate.json
+/campaigns/
+/benchmark-runs/
 
 # Python
 __pycache__/

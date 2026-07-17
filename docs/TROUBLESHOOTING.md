@@ -4,14 +4,12 @@ This guide addresses common issues when setting up and running AutoEvaluation.
 
 ## Entry Points: Which Path Should I Take?
 
-The README shows three entry points (`/autoeval`, `start.sh`, `setup.py` + `run_loop.py`). This decision tree helps you pick the right one.
+The recommended entry point is the unified `autoeval.py` CLI. Claude Code users can also invoke `/autoeval`; both paths delegate to the same driver.
 
 ```
 Do you have Claude Code installed?
-├─ YES → Use the /autoeval skill (conversational setup → dashboard → autopilot)
-│        installed automatically by start.sh into ~/.claude/skills/
-│
-└─ NO  → Use: python3 tools/run_loop.py
+├─ YES → Use /autoeval for a conversational flow, or the CLI below
+└─ NO  → Use: python3 autoeval.py run
 ```
 
 ### Claude Code Entry Point
@@ -26,10 +24,10 @@ The headless path **always works** and doesn't depend on Claude Code at all:
 
 ```bash
 # Make sure your venv is activated and config.yaml exists
-python3 tools/run_loop.py --iterations 10
+python3 autoeval.py run --iterations 10
 ```
 
-This is the most reliable entry point. It's a standard Python script with no Claude Code dependency.
+This is a standard Python CLI with no Claude Code dependency. Use `status`, `finalize`, and `new` to manage the explicit campaign lifecycle.
 
 To measure how noisy your judge/prompt set is before trusting KEEP/DISCARD decisions:
 

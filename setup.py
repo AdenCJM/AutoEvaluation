@@ -15,6 +15,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import difflib
+import getpass
 import json
 import os
 import re
@@ -25,7 +27,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "tools"))
-from utils import DEFAULT_MODELS, load_env, default_dimensions
+from utils import DEFAULT_MODELS, load_env, default_dimensions, split_prompt_sets, validate_prompts
 from generate_config import write_all as _write_all
 from run_state import atomic_write_text
 
@@ -195,7 +197,12 @@ def step_provider() -> tuple[str, str, str, str]:
 
     # Loop until we get a valid API key
     while True:
-        api_key = ask(f"Your API key (will be saved to .env as {api_key_env})")
+        api_key = getpass.getpass(
+            f"Your API key (saved to .env as {api_key_env}; input hidden): "
+        ).strip()
+        if not api_key:
+            print("  API key is required.")
+            continue
         if validate_api_key(provider, model, api_key_env, api_key):
             break
         print("  API key validation failed. Please check and try again.")
@@ -326,7 +333,7 @@ def step_duration() -> tuple[int, float]:
     print("  - Set both to 0 for unlimited (until manually stopped)")
     print()
 
-    max_iterations = ask_int("Max iterations (0 = unlimited)", 0)
+    max_iterations = ask_int("Max iterations (0 = unlimited)", 10)
     max_hours = ask_float("Max hours (0 = unlimited)", 0)
 
     return max_iterations, max_hours
@@ -369,7 +376,7 @@ def step_advanced() -> dict:
     judge_sees_skill = ask_choice("Semi-blind judge (judge sees SKILL.md for task_accuracy)?", ["y", "n"], "y")
     replicates = ask_int("Replicates per prompt - completions generated per test prompt (higher = less noise, more cost)", 3)
     convergence_window = ask_int("Convergence window - stop after N iterations with no improvement (0 = disabled)", 0)
-    max_cost_usd = ask_float("Max cost in USD - stop when estimated spend exceeds this (0 = unlimited)", 0)
+    max_cost_usd = ask_float("Max cost in USD - stop when estimated spend exceeds this (0 = unlimited)", 10)
     max_concurrent = ask_int("Parallel workers for generation and evaluation (1 = serial)", 4)
 
     return {
@@ -484,21 +491,231 @@ Generate exactly 30 diverse test prompts that would thoroughly evaluate this ski
         for p in valid_prompts:
             print(f"    · [{p['id']}] ({p['genre']}) {p['prompt'][:70]}{'...' if len(p['prompt']) > 70 else ''}")
 
-        print()
-        use_them = ask("Use these prompts? (y = yes, n = enter manually, r = regenerate)", "y")
-        if use_them.lower() == "r":
-            return generate_test_prompts_with_ai(
-                provider, model, api_key_env, skill_name, skill_description, skill_content
-            )
-        elif use_them.lower() == "y":
-            return valid_prompts
-        else:
-            return None  # Fall through to manual entry
+        return valid_prompts
 
     except Exception as e:
         print(f" ✗ {type(e).__name__}: {e}")
         print("  Falling back to manual prompt entry.")
         return None
+
+
+def prompt_coverage(prompts: list[dict]) -> dict:
+    genres = sorted({str(p.get("genre", "general")).strip().lower() for p in prompts})
+    lengths = [len(str(p.get("prompt", "")).split()) for p in prompts]
+    duplicates = []
+    for i, left in enumerate(prompts):
+        for j in range(i + 1, len(prompts)):
+            ratio = difflib.SequenceMatcher(
+                None,
+                left.get("prompt", "").lower(),
+                prompts[j].get("prompt", "").lower(),
+            ).ratio()
+            if ratio >= 0.82:
+                duplicates.append((left.get("id"), prompts[j].get("id"), round(ratio, 2)))
+    train, validation, final = split_prompt_sets(prompts, 0.3, 0.2)
+    return {
+        "genres": genres,
+        "duplicates": duplicates,
+        "short": sum(1 for length in lengths if length <= 12),
+        "medium": sum(1 for length in lengths if 12 < length <= 30),
+        "long": sum(1 for length in lengths if length > 30),
+        "split": (len(train), len(validation), len(final)),
+    }
+
+
+def _print_prompt_coverage(prompts: list[dict]) -> None:
+    coverage = prompt_coverage(prompts)
+    train, validation, final = coverage["split"]
+    print("\nEvaluation-plan coverage")
+    print("-" * 50)
+    print(f"  Prompts: {len(prompts)} across {len(coverage['genres'])} genres")
+    print(f"  Length mix: {coverage['short']} short / {coverage['medium']} medium / {coverage['long']} long")
+    print(f"  Planned split: {train} train / {validation} validation / {final} final test")
+    if coverage["duplicates"]:
+        pairs = ", ".join(f"{a}/{b}" for a, b, _ in coverage["duplicates"][:4])
+        print(f"  WARNING: possible near-duplicates: {pairs}")
+    if train < 8:
+        print("  WARNING: fewer than 8 training prompts; statistical decisions will degrade.")
+    if len(coverage["genres"]) < 5:
+        print("  WARNING: narrow genre coverage; add realistic edge cases before launch.")
+
+
+def regenerate_one_prompt(
+    provider: str,
+    model: str,
+    api_key_env: str,
+    skill_content: str,
+    current: dict,
+) -> dict | None:
+    from model_client import ModelClient
+    client = ModelClient(provider=provider, model=model, api_key_env=api_key_env)
+    system = (
+        "You design realistic test cases for LLM instructions. Return exactly one "
+        "JSON object with id, genre, and prompt. Make it materially different from "
+        "the supplied case while testing the same broad capability."
+    )
+    response = client.generate(
+        system,
+        f"Skill:\n{skill_content}\n\nReplace this test case:\n{json.dumps(current)}",
+        max_tokens=500,
+    )
+    try:
+        start, end = response.find("{"), response.rfind("}")
+        item = json.loads(response[start:end + 1])
+        if not all(isinstance(item.get(key), str) and item[key].strip() for key in ("id", "genre", "prompt")):
+            raise ValueError("replacement is missing fields")
+        item["id"] = _sanitise_prompt_id(item["id"], current.get("id", "prompt"))
+        return item
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(f"  Could not parse replacement: {exc}")
+        return None
+
+
+def review_prompt_plan(
+    prompts: list[dict],
+    provider: str,
+    model: str,
+    api_key_env: str,
+    skill_content: str,
+) -> list[dict]:
+    """Small terminal workbench for inspecting and editing the eval suite."""
+    while True:
+        _print_prompt_coverage(prompts)
+        print("\n  [a] accept  [l] list  [e] edit  [d] delete  [r] regenerate one  [n] new")
+        action = ask("Choose an action", "a").lower()
+        if action == "a":
+            try:
+                validate_prompts(prompts)
+            except ValueError as exc:
+                print(f"  Cannot accept this plan yet: {exc}")
+                continue
+            return prompts
+        if action == "l":
+            for index, prompt in enumerate(prompts, 1):
+                print(f"  {index:>2}. [{prompt['id']}] {prompt['genre']}: {prompt['prompt']}")
+            continue
+        if action in {"e", "d", "r"}:
+            index = ask_int("Prompt number", 1) - 1
+            if not 0 <= index < len(prompts):
+                print("  Invalid prompt number.")
+                continue
+            if action == "d":
+                removed = prompts.pop(index)
+                print(f"  Removed {removed['id']}.")
+            elif action == "e":
+                current = prompts[index]
+                current["id"] = _sanitise_prompt_id(ask("ID", current["id"]), current["id"])
+                current["genre"] = ask("Genre", current["genre"])
+                current["prompt"] = ask("Prompt", current["prompt"])
+            else:
+                replacement = regenerate_one_prompt(
+                    provider, model, api_key_env, skill_content, prompts[index]
+                )
+                if replacement:
+                    prompts[index] = replacement
+                    print(f"  Replaced prompt {index + 1}.")
+            continue
+        if action == "n":
+            prompts.append({
+                "id": _sanitise_prompt_id(ask("ID"), f"prompt_{len(prompts) + 1}"),
+                "genre": ask("Genre"),
+                "prompt": ask("Prompt"),
+            })
+            continue
+        print("  Unknown action.")
+
+
+def review_dimensions(dimensions: list[dict]) -> list[dict]:
+    vague = ("high quality", "is it good", "excellent", "appropriate")
+    print("\nRubric review")
+    print("-" * 50)
+    for index, dim in enumerate(dimensions, 1):
+        rubric = str(dim.get("rubric", ""))
+        warning = ""
+        if len(rubric) < 60 or any(term in rubric.lower() for term in vague):
+            warning = "  ⚠ make criteria more observable"
+        print(f"  {index}. {dim['name']} ({float(dim['weight']):.0%}){warning}")
+    while ask("Edit a rubric dimension? (y/n)", "n").lower() == "y":
+        index = ask_int("Dimension number", 1) - 1
+        if not 0 <= index < len(dimensions):
+            print("  Invalid dimension number.")
+            continue
+        dimensions[index]["rubric"] = ask("Observable 1-to-5 criteria", dimensions[index]["rubric"])
+        weight = ask_float("Weight", float(dimensions[index]["weight"]))
+        if weight <= 0:
+            print("  Weight must be greater than zero.")
+            continue
+        dimensions[index]["weight"] = weight
+    total = sum(float(dim["weight"]) for dim in dimensions)
+    if total <= 0:
+        raise ValueError("rubric weights must sum to more than zero")
+    if abs(total - 1.0) > 0.01:
+        print(f"  Normalising rubric weights from {total:.2f} to 1.00.")
+        for dim in dimensions:
+            dim["weight"] = float(dim["weight"]) / total
+    return dimensions
+
+
+def estimate_campaign_plan(
+    prompts: list[dict], dimensions: list[dict], provider: str, model: str,
+    judge_model: str, iterations: int, replicates: int, skill_content: str,
+) -> dict:
+    """Return a transparent range, not a false-precision billing promise."""
+    from model_client import ModelClient
+    train, validation, final = split_prompt_sets(prompts, 0.3, 0.2)
+    iterations = iterations or 10
+    eval_calls = lambda count: count * replicates * 2
+    baseline_calls = eval_calls(len(prompts))
+    per_iteration = eval_calls(len(train)) + 1
+    validation_calls = eval_calls(len(validation))
+    final_calls = eval_calls(len(final))
+    min_calls = baseline_calls + iterations * per_iteration + final_calls
+    max_calls = min_calls + iterations * validation_calls
+
+    gen_price = ModelClient.price_for_model(model)
+    judge_price = ModelClient.price_for_model(judge_model or model)
+    # Typical instruction-evaluation workload assumptions. The range is
+    # intentionally broad and is labelled as an estimate in the UI.
+    skill_tokens = max(200, len(skill_content) // 4)
+    rubric_tokens = max(250, sum(len(str(d.get("rubric", ""))) for d in dimensions) // 4)
+    gen_cost = (skill_tokens + 150) * gen_price[0] + 700 * gen_price[1] if gen_price else 0
+    judge_cost = (rubric_tokens + 850) * judge_price[0] + 250 * judge_price[1] if judge_price else 0
+    pair_cost = gen_cost + judge_cost
+    modifier_cost = 6000 * gen_price[0] + 2500 * gen_price[1] if gen_price else 0
+    base_pairs = len(prompts) * replicates
+    min_pairs = base_pairs + iterations * len(train) * replicates + len(final) * replicates
+    max_pairs = min_pairs + iterations * len(validation) * replicates
+    min_cost = min_pairs * pair_cost + iterations * modifier_cost
+    max_cost = max_pairs * pair_cost + iterations * modifier_cost
+    return {
+        "split": (len(train), len(validation), len(final)),
+        "calls": (min_calls, max_calls),
+        "cost": (min_cost, max_cost) if gen_price and judge_price else None,
+        "iterations": iterations,
+        "replicates": replicates,
+    }
+
+
+def print_campaign_plan(plan: dict, provider: str, model: str, judge_model: str, cap: float) -> None:
+    train, validation, final = plan["split"]
+    low_calls, high_calls = plan["calls"]
+    print("\n" + "=" * 50)
+    print("CAMPAIGN PLAN")
+    print("=" * 50)
+    print(f"  Prompts:       {train} train / {validation} validation / {final} final test")
+    print(f"  Replicates:    {plan['replicates']} per prompt")
+    print(f"  Attempts:      {plan['iterations']}")
+    print(f"  Models:        {provider}/{model} · judge {judge_model or model}")
+    print(f"  Estimated calls: {low_calls:,}–{high_calls:,}")
+    if plan["cost"]:
+        low, high = plan["cost"]
+        print(f"  Estimated cost:  ${low:.2f}–${high:.2f} (standard list pricing)")
+        if cap and low > cap:
+            print(f"  WARNING: the ${cap:.2f} cap is below the low estimate; the campaign may stop early.")
+    else:
+        print("  Estimated cost:  unavailable for an unpriced model")
+    print(f"  Hard cost cap:   {'unlimited' if not cap else f'${cap:.2f}'}")
+    print("  Final test:      locked until `python3 autoeval.py finalize`")
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +851,7 @@ Examples:
         "--defaults",
         action="store_true",
         help="Skip all interactive prompts. Uses Gemini, 3 default rubric dimensions, "
-             "5 default test prompts, 10 iterations. Requires API key in .env or environment.",
+             "30 default test prompts, 10 iterations. Requires API key in .env or environment.",
     )
     parser.add_argument(
         "--provider",
@@ -709,21 +926,13 @@ Examples:
 
         # Skill
         if args.skill_file:
-            dest = PROJECT_ROOT / "SKILL.md"
-            if args.skill_file.resolve() != dest.resolve():
-                shutil.copy2(args.skill_file, dest)
-            skill_content = None
+            skill_content = args.skill_file.read_text(encoding="utf-8")
         else:
             skill_content = None  # Keep existing SKILL.md or placeholder
 
         # Prompts
         if args.prompts_file:
-            prompts_dir = PROJECT_ROOT / "prompts"
-            prompts_dir.mkdir(exist_ok=True)
-            dest = prompts_dir / "prompts.json"
-            if args.prompts_file.resolve() != dest.resolve():
-                shutil.copy2(args.prompts_file, dest)
-            prompts = None
+            prompts = prompts_data
         elif args.generate_prompts and args.skill_file:
             skill_name, skill_desc, skill_text = parse_skill_file(args.skill_file)
             prompts = generate_test_prompts_with_ai(
@@ -742,6 +951,22 @@ Examples:
         print(f"  Prompts:     {len(prompts) if prompts else 'existing'}")
         print(f"  Iterations:  10")
 
+        effective_prompts = prompts or json.loads(
+            (PROJECT_ROOT / "prompts/prompts.json").read_text(encoding="utf-8")
+        )
+        safe_advanced = {
+            "judge_sees_skill": True,
+            "replicates_per_prompt": 3,
+            "convergence_window": 0,
+            "max_cost_usd": 10,
+            "max_concurrent": 4,
+        }
+        plan = estimate_campaign_plan(
+            effective_prompts, _default_dimensions(), provider, model, "",
+            10, 3, skill_content or (PROJECT_ROOT / "SKILL.md").read_text(encoding="utf-8"),
+        )
+        print_campaign_plan(plan, provider, model, "", 10)
+
         print("\n" + "=" * 50)
         print("WRITING FILES")
         print("=" * 50)
@@ -750,13 +975,14 @@ Examples:
             provider, model, api_key_env, api_key,
             skill_content, "SKILL.md",
             prompts, _default_dimensions(), 10, 0,
+            advanced=safe_advanced,
         )
 
         print("\n" + "=" * 50)
         print("  SETUP COMPLETE!")
         print("=" * 50)
         print()
-        print("  Start: ./start.sh  or  python3 tools/run_loop.py")
+        print("  Start: ./start.sh  or  python3 autoeval.py run")
         print()
         return
 
@@ -786,14 +1012,10 @@ Examples:
 
     # --- Step 2: Skill ---
     if args.skill_file:
-        # Copy the skill file into the project root as SKILL.md
-        dest = PROJECT_ROOT / "SKILL.md"
-        if args.skill_file.resolve() != dest.resolve():
-            shutil.copy2(args.skill_file, dest)
-            print(f"\n  Copied {args.skill_file} -> SKILL.md")
-        skill_content = None  # Don't overwrite in write_files
+        # Keep the source untouched until the user accepts the preflight plan.
         skill_path_config = "SKILL.md"
         skill_name, skill_desc, skill_text = parse_skill_file(args.skill_file)
+        skill_content = skill_text
     else:
         skill_name, skill_desc, skill_content = step_skill()
         skill_path_config = "SKILL.md"
@@ -801,14 +1023,7 @@ Examples:
 
     # --- Step 3: Prompts ---
     if args.prompts_file:
-        # Copy the prompts file into prompts/prompts.json
-        prompts_dir = PROJECT_ROOT / "prompts"
-        prompts_dir.mkdir(exist_ok=True)
-        dest = prompts_dir / "prompts.json"
-        if args.prompts_file.resolve() != dest.resolve():
-            shutil.copy2(args.prompts_file, dest)
-            print(f"  Copied {args.prompts_file} -> prompts/prompts.json")
-        prompts = None  # Don't overwrite in write_files
+        prompts = prompts_data
     else:
         # Offer AI prompt generation
         print("\n" + "=" * 50)
@@ -834,8 +1049,12 @@ Examples:
         else:
             prompts = step_prompts()
 
+    prompts = review_prompt_plan(
+        prompts, provider, model, api_key_env, skill_text or skill_content or ""
+    )
+
     # --- Step 4: Eval rubric ---
-    dimensions = step_eval_rubric()
+    dimensions = review_dimensions(step_eval_rubric())
 
     # --- Step 5: Duration ---
     max_iterations, max_hours = step_duration()
@@ -845,6 +1064,23 @@ Examples:
 
     # --- Step 7: Advanced ---
     advanced = step_advanced()
+
+    plan = estimate_campaign_plan(
+        prompts,
+        dimensions,
+        provider,
+        model,
+        judge.get("judge_model", ""),
+        max_iterations,
+        advanced["replicates_per_prompt"],
+        skill_text or skill_content or "",
+    )
+    print_campaign_plan(
+        plan, provider, model, judge.get("judge_model", ""), advanced["max_cost_usd"]
+    )
+    if ask("Create this configuration? (y/n)", "y").lower() != "y":
+        print("Setup cancelled; no configuration files were written.")
+        return
 
     # --- Write files ---
     print("\n" + "=" * 50)

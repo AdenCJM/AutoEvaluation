@@ -285,6 +285,9 @@ def write_all(
         "results_tsv": "results.tsv",
         "max_iterations": iterations,
         "max_hours": max_hours,
+        "convergence_window": 0,
+        "max_cost_usd": 10,
+        "max_concurrent": 4,
         "judge_sees_skill": True,
         "replicates_per_prompt": 3,
         "accept_rule": "paired",
@@ -312,8 +315,8 @@ def write_all(
         config["judge_sees_skill"] = advanced.get("judge_sees_skill", True)
         config["replicates_per_prompt"] = advanced.get("replicates_per_prompt", 3)
         config["convergence_window"] = advanced.get("convergence_window", 0)
-        config["max_cost_usd"] = advanced.get("max_cost_usd", 0)
-        config["max_concurrent"] = advanced.get("max_concurrent", 1)
+        config["max_cost_usd"] = advanced.get("max_cost_usd", 10)
+        config["max_concurrent"] = advanced.get("max_concurrent", 4)
     cfg_path = PROJECT_ROOT / "config.yaml"
     atomic_write_text(cfg_path, yaml.dump(config, default_flow_style=False, sort_keys=False))
     print("  ✓ config.yaml")

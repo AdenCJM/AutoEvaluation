@@ -211,6 +211,8 @@ def run_experiment(
     agg = json.loads(agg_path.read_text(encoding="utf-8"))
 
     elapsed = time.time() - start_time
+    agg["elapsed_seconds"] = round(elapsed, 3)
+    agg_path.write_text(json.dumps(agg, indent=2) + "\n", encoding="utf-8")
 
     if agg.get("judge_errors"):
         print(f"Note: {agg['judge_errors']} judge failures excluded "

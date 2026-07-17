@@ -3,7 +3,7 @@ Live Tracking Dashboard
 ========================
 Single-file Python HTTP server that serves a live-updating dashboard
 for the optimisation loop. No external dependencies beyond Python stdlib
-and PyYAML. Chart.js loaded from CDN.
+and PyYAML. Chart.js is vendored for a reliable local-first experience.
 
 Reads metric names from config.yaml so it works for any use case.
 
@@ -16,12 +16,16 @@ Then open http://localhost:8050 in your browser.
 
 import argparse
 import csv
+import difflib
 import json
+import re
 import sys
+import threading
+import webbrowser
 import yaml
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import PROJECT_ROOT
@@ -29,9 +33,9 @@ from utils import PROJECT_ROOT
 DEFAULT_TSV = PROJECT_ROOT / "results.tsv"
 
 
-def load_config():
+def load_config(config_path: str | Path | None = None):
     """Load config.yaml and extract metric info."""
-    cfg_path = PROJECT_ROOT / "config.yaml"
+    cfg_path = Path(config_path) if config_path else PROJECT_ROOT / "config.yaml"
     if not cfg_path.exists():
         return {"metric_names": [], "metric_labels": {}, "metric_directions": {}, "skill_name": ""}
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -65,6 +69,128 @@ def load_config():
         skill_name = skill_name.replace("-", " ").replace("_", " ").title()
 
     return {"metric_names": names, "metric_labels": labels, "metric_directions": directions, "skill_name": skill_name}
+
+
+def read_campaign() -> dict:
+    manifest_path = PROJECT_ROOT / ".tmp" / "campaign.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        manifest = {"name": "AutoEvaluation campaign", "status": "not_started"}
+    manifest["finalized"] = (
+        (PROJECT_ROOT / "final_test_aggregate.json").exists()
+        or manifest.get("status") == "finalized"
+    )
+    return manifest
+
+
+def _safe_run_id(run_id: str) -> str:
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", run_id or ""):
+        raise ValueError("invalid run id")
+    return run_id
+
+
+def _json_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def read_experiment_detail(run_id: str, tsv_path: str, metric_config: dict) -> dict:
+    run_id = _safe_run_id(run_id)
+    dashboard = read_tsv(tsv_path, metric_config)
+    run = next((item for item in dashboard["runs"] if item["run_id"] == run_id), None)
+    if run is None:
+        raise FileNotFoundError(run_id)
+
+    eval_dir = PROJECT_ROOT / ".tmp" / "evals" / run_id
+    samples_dir = PROJECT_ROOT / ".tmp" / "samples" / run_id
+    decision = _json_file(eval_dir / "decision.json")
+    aggregate = _json_file(eval_dir / "aggregate.json")
+
+    run_ids = [item["run_id"] for item in dashboard["runs"]]
+    index = run_ids.index(run_id)
+    prior_confirmed = [
+        item for item in dashboard["runs"][:index]
+        if (item.get("decision") or "").upper() in {"BASELINE", "KEEP"}
+    ]
+    previous_id = prior_confirmed[-1]["run_id"] if prior_confirmed else None
+    skill_path = PROJECT_ROOT / ".tmp" / "skills" / f"{run_id}.md"
+    previous_path = PROJECT_ROOT / ".tmp" / "skills" / f"{previous_id}.md" if previous_id else None
+    diff = ""
+    if skill_path.exists() and previous_path and previous_path.exists():
+        diff = "".join(difflib.unified_diff(
+            previous_path.read_text(encoding="utf-8").splitlines(keepends=True),
+            skill_path.read_text(encoding="utf-8").splitlines(keepends=True),
+            fromfile=previous_id or "baseline",
+            tofile=run_id,
+            n=3,
+        ))
+
+    scored = []
+    for judge_file in eval_dir.glob("*_llm_judge.json"):
+        data = _json_file(judge_file)
+        values = [
+            float(value["normalised"])
+            for value in data.values()
+            if isinstance(value, dict) and "normalised" in value
+        ]
+        if values:
+            scored.append((sum(values) / len(values), judge_file, data))
+    worst = []
+    for score, judge_file, data in sorted(scored, key=lambda item: item[0])[:3]:
+        sample_name = judge_file.name.replace("_llm_judge.json", "")
+        sample_path = samples_dir / f"{sample_name}.txt"
+        reasons = {
+            name: value.get("reason", "")
+            for name, value in data.items()
+            if isinstance(value, dict) and value.get("reason")
+        }
+        worst.append({
+            "sample": sample_name,
+            "score": round(score, 4),
+            "output": sample_path.read_text(encoding="utf-8")[:4000] if sample_path.exists() else "",
+            "reasons": reasons,
+        })
+    return {"run": run, "decision": decision, "aggregate": aggregate, "diff": diff, "worst_samples": worst}
+
+
+def read_campaign_comparison(tsv_path: str, metric_config: dict) -> dict:
+    """Compare the campaign's untouched starting instruction with the confirmed best."""
+    dashboard = read_tsv(tsv_path, metric_config)
+    baseline = dashboard.get("first")
+    best = dashboard.get("best")
+    if not baseline or not best:
+        raise FileNotFoundError("campaign comparison unavailable")
+
+    baseline_path = PROJECT_ROOT / ".tmp" / "skills" / "baseline.md"
+    best_path = PROJECT_ROOT / "SKILL.md.best"
+    diff = ""
+    if baseline_path.exists() and best_path.exists():
+        diff = "".join(difflib.unified_diff(
+            baseline_path.read_text(encoding="utf-8").splitlines(keepends=True),
+            best_path.read_text(encoding="utf-8").splitlines(keepends=True),
+            fromfile="campaign-baseline",
+            tofile=f"confirmed-best-{best['run_id']}",
+            n=3,
+        ))
+    metrics = []
+    for name in dashboard.get("metric_names", []):
+        metrics.append({
+            "name": name,
+            "label": dashboard.get("metric_labels", {}).get(name, name.replace("_", " ").title()),
+            "baseline": baseline.get(name),
+            "best": best.get(name),
+            "delta": (best.get(name, 0) - baseline.get(name, 0)),
+        })
+    return {
+        "baseline": baseline,
+        "best": best,
+        "delta": best["composite_score"] - baseline["composite_score"],
+        "metrics": metrics,
+        "diff": diff,
+    }
 
 
 def read_tsv(tsv_path: str, metric_config: dict) -> dict:
@@ -167,10 +293,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AutoEvaluation Dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Instrument+Serif&display=swap" rel="stylesheet">
-<link href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.css" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="/static/chart.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -203,9 +326,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     --shadow-sm: 0 1px 2px rgba(0,0,0,0.20);
     --shadow-md: 0 2px 8px rgba(0,0,0,0.25);
     --shadow-lg: 0 4px 16px rgba(0,0,0,0.30);
-    --font-display: 'Instrument Serif', Georgia, serif;
-    --font-body: 'Instrument Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-mono: 'Geist Mono', 'SF Mono', 'Fira Code', monospace;
+    --font-display: Georgia, 'Times New Roman', serif;
+    --font-body: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'SF Mono', 'Fira Code', Consolas, monospace;
 }
 
 /* ── Light Mode Override ── */
@@ -638,6 +761,51 @@ tr:hover td { background: var(--bg-card-hover); }
 }
 .theme-toggle:hover { border-color: var(--accent-border); color: var(--accent); }
 
+.action-bar {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px;
+    align-items: center;
+}
+.action-bar a, .action-bar button {
+    text-decoration: none; border: 1px solid var(--border); background: var(--bg-card);
+    color: var(--text-secondary); padding: 8px 12px; border-radius: 7px;
+    font: 600 12px var(--font-body); cursor: pointer;
+}
+.action-bar a:hover, .action-bar button:hover { color: var(--accent); border-color: var(--accent-border); }
+.campaign-pill { margin-left: auto; color: var(--text-muted); font-size: 12px; }
+.outcome-card {
+    display:none; margin-bottom:18px; padding:18px; border-radius:10px;
+    background:linear-gradient(120deg,var(--bg-card),var(--accent-light));
+    border:1px solid var(--accent-border);
+}
+.outcome-card.visible { display:flex; align-items:center; justify-content:space-between; gap:18px; }
+.outcome-card h2 { font:700 20px var(--font-display); color:var(--text-primary); margin-bottom:4px; }
+.outcome-card p { color:var(--text-secondary); font-size:13px; }
+.outcome-score { color:var(--green); font:700 24px var(--font-mono); white-space:nowrap; }
+.row-link { all: unset; color: var(--accent); cursor: pointer; font-weight: 700; }
+.row-link:hover { text-decoration: underline; }
+.drawer-backdrop {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 500;
+}
+.drawer-backdrop.open { display: block; }
+.drawer {
+    position: absolute; top: 0; right: 0; width: min(720px, 92vw); height: 100%;
+    overflow-y: auto; background: var(--bg-page); padding: 24px; box-shadow: -8px 0 30px rgba(0,0,0,.25);
+}
+.drawer-head { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:20px; }
+.drawer h2 { font-family:var(--font-display); font-size:28px; color:var(--accent); }
+.drawer h3 { margin:22px 0 8px; font-size:13px; text-transform:uppercase; color:var(--text-muted); letter-spacing:.5px; }
+.drawer-close { border:1px solid var(--border); background:var(--bg-card); color:var(--text-primary); padding:7px 10px; border-radius:6px; cursor:pointer; }
+.detail-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+.detail-stat { background:var(--bg-card); border:1px solid var(--border); padding:12px; border-radius:8px; }
+.detail-stat span { display:block; color:var(--text-muted); font-size:10px; text-transform:uppercase; }
+.detail-stat strong { display:block; margin-top:4px; font-size:16px; }
+.reason-box, .sample-card, pre.diff { background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:14px; }
+pre.diff { overflow:auto; white-space:pre; font:11px/1.55 var(--font-mono); max-height:320px; }
+.sample-card { margin-bottom:10px; }
+.sample-output { white-space:pre-wrap; max-height:220px; overflow:auto; font-size:12px; color:var(--text-secondary); margin-top:8px; }
+.toast { position:fixed; right:20px; bottom:60px; z-index:800; background:var(--text-primary); color:var(--bg-page); padding:10px 14px; border-radius:7px; display:none; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+
 .empty-state {
     text-align: center;
     padding: 100px 20px;
@@ -665,6 +833,32 @@ tr:hover td { background: var(--bg-card-hover); }
     .container { padding: 16px; }
     .hero-stats { gap: 16px; }
 }
+@media (max-width: 600px) {
+    body { padding-bottom: 72px; overflow-x: hidden; }
+    .header { padding: 14px 16px; display:block; }
+    .header > div:last-child { display:block !important; }
+    .header-left { margin-bottom:12px; }
+    .hero-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .hero-stat { text-align:left; min-width:0; }
+    .hero-stat .value { font-size:25px; }
+    .theme-toggle { position:absolute; top:14px; right:16px; }
+    .metric-grid { grid-template-columns:1fr; }
+    .container { padding:14px; width:100%; overflow:hidden; }
+    .elapsed-card, .run-progress-card { display:block; }
+    .elapsed-details, .run-progress-details { margin-top:12px; gap:10px; justify-content:space-between; }
+    .elapsed-detail, .run-progress-detail { text-align:left; }
+    .chart-container { height:230px; }
+    .radar-container { height:280px; }
+    .history-table { overflow-x:auto; }
+    table { min-width:620px; }
+    .status-bar { padding:9px 14px; gap:8px; }
+    #statusText { display:block; max-width:260px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .campaign-pill { width:100%; margin-left:0; }
+    .outcome-card.visible { display:block; }
+    .outcome-score { margin-top:12px; }
+    .drawer { width:100vw; padding:18px; }
+    .detail-grid { grid-template-columns:1fr 1fr; }
+}
 </style>
 </head>
 <body>
@@ -675,7 +869,7 @@ tr:hover td { background: var(--bg-card-hover); }
         <div class="subtitle" id="hdr-subtitle">Autonomous Skill Optimisation</div>
     </div>
     <div style="display:flex;align-items:center;gap:16px;">
-    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#9680;</button>
+    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle light or dark theme">&#9680;</button>
     <div class="hero-stats">
         <div class="hero-stat">
             <div class="label">Best Score</div>
@@ -697,14 +891,34 @@ tr:hover td { background: var(--bg-card-hover); }
             <div class="value" id="hdr-final">&mdash;</div>
             <div class="sub" id="hdr-final-delta">Untouched</div>
         </div>
+        <div class="hero-stat">
+            <div class="label">Cost</div>
+            <div class="value" id="hdr-cost">&mdash;</div>
+            <div class="sub">Estimated</div>
+        </div>
     </div>
     </div>
 </div>
 
 <div class="container" id="main-content">
+    <div class="action-bar" aria-label="Campaign actions">
+        <button onclick="copyBest()">Copy best instruction</button>
+        <a href="/api/file?name=best" download>Download best</a>
+        <a id="reportAction" href="/api/file?name=report" download>Export report</a>
+        <button onclick="openComparison()">Compare baseline and best</button>
+        <button onclick="copyInstall('codex')">Copy Codex install command</button>
+        <button onclick="copyInstall('claude')">Copy Claude install command</button>
+        <button id="finalizeAction" onclick="copyCommand('python3 autoeval.py finalize', 'Finalize command copied')">Copy finalize command</button>
+        <button onclick="copyCommand('python3 autoeval.py new', 'New-campaign command copied')">Copy new-campaign command</button>
+        <span class="campaign-pill" id="campaignPill">Campaign not started</span>
+    </div>
+    <section class="outcome-card" id="outcomeCard" aria-live="polite">
+        <div><h2>Campaign finalized</h2><p id="outcomeText">The confirmed best is ready to use.</p></div>
+        <div class="outcome-score" id="outcomeScore">&mdash;</div>
+    </section>
     <div class="empty-state" id="empty-state">
         <h2>Waiting for first experiment&hellip;</h2>
-        <p>Run <code>python3 tools/experiment_runner.py --run-id baseline</code> to start</p>
+        <p>Run <code>python3 autoeval.py run</code> to establish the baseline</p>
     </div>
 
     <div id="dashboard" style="display:none;">
@@ -768,7 +982,8 @@ tr:hover td { background: var(--bg-card-hover); }
             </div>
             <div class="card">
                 <div class="chart-container">
-                    <canvas id="compositeChart"></canvas>
+                    <canvas id="compositeChart" role="img" aria-label="Composite scores by experiment"></canvas>
+                    <div class="sr-only" id="compositeSummary"></div>
                 </div>
             </div>
         </div>
@@ -790,7 +1005,7 @@ tr:hover td { background: var(--bg-card-hover); }
                     </div>
                     <div class="card">
                         <div class="radar-container">
-                            <canvas id="radarChart"></canvas>
+                            <canvas id="radarChart" role="img" aria-label="Baseline compared with the confirmed best across all metrics"></canvas>
                         </div>
                     </div>
                 </div>
@@ -822,8 +1037,17 @@ tr:hover td { background: var(--bg-card-hover); }
 
 <div class="status-bar">
     <span><span class="status-dot" id="statusDot"></span><span id="statusText">Connecting&hellip;</span></span>
-    <button id="pauseBtn" onclick="togglePause()">Pause</button>
+    <button id="pauseBtn" onclick="togglePause()" aria-label="Pause dashboard polling">Pause</button>
 </div>
+
+<div class="drawer-backdrop" id="detailBackdrop" onclick="closeDetail(event)">
+  <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+    <div class="drawer-head"><div><h2 id="detailTitle">Experiment</h2><div id="detailSubtitle"></div></div>
+      <button class="drawer-close" onclick="closeDetail()" aria-label="Close experiment details">Close</button></div>
+    <div id="detailBody">Loading&hellip;</div>
+  </aside>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 // Theme toggle
@@ -854,6 +1078,91 @@ let lastDataHash = "";
 
 function pct(v) { return (v * 100).toFixed(1) + '%'; }
 function pctInt(v) { return Math.round(v * 100) + '%'; }
+function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function showToast(message) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message; toast.style.display = 'block';
+    setTimeout(() => { toast.style.display = 'none'; }, 2200);
+}
+async function copyBest() {
+    const response = await fetch('/api/file?name=best&raw=1');
+    if (!response.ok) { showToast('No confirmed best instruction yet'); return; }
+    await navigator.clipboard.writeText(await response.text());
+    showToast('Best instruction copied');
+}
+async function copyInstall(target) {
+    const name = (window.__latestData && window.__latestData.skill_name || 'autoeval-skill').toLowerCase().replace(/[^a-z0-9]+/g,'-');
+    const root = target === 'codex' ? '~/.codex/skills/' : '~/.claude/skills/';
+    const command = `mkdir -p ${root}${name} && cp SKILL.md.best ${root}${name}/SKILL.md`;
+    await navigator.clipboard.writeText(command); showToast(`${target === 'codex' ? 'Codex' : 'Claude'} install command copied`);
+}
+async function copyCommand(command, message) { await navigator.clipboard.writeText(command); showToast(message); }
+function formatScore(value) { return value == null ? '—' : pct(value); }
+async function openDetail(runId) {
+    const backdrop = document.getElementById('detailBackdrop');
+    backdrop.classList.add('open');
+    document.getElementById('detailTitle').textContent = runId;
+    document.getElementById('detailSubtitle').textContent = 'Loading decision evidence…';
+    document.getElementById('detailBody').innerHTML = '';
+    try {
+        const response = await fetch('/api/experiment?run_id=' + encodeURIComponent(runId));
+        if (!response.ok) throw new Error('Details are unavailable for this historical run');
+        const data = await response.json();
+        const run = data.run || {}, decision = data.decision || {};
+        document.getElementById('detailSubtitle').textContent = run.change_description || 'Campaign baseline';
+        const verdict = decision.training_verdict || {};
+        const validation = decision.validation_verdict || {};
+        const samples = (data.worst_samples || []).map(sample => `<div class="sample-card">
+            <strong>${escapeHtml(sample.sample)} · ${pct(sample.score)}</strong>
+            <div>${Object.entries(sample.reasons || {}).map(([name, reason]) => `<p><b>${escapeHtml(name)}:</b> ${escapeHtml(reason)}</p>`).join('')}</div>
+            <div class="sample-output">${escapeHtml(sample.output || 'Sample artifact unavailable')}</div></div>`).join('');
+        document.getElementById('detailBody').innerHTML = `
+          <div class="detail-grid">
+            <div class="detail-stat"><span>Decision</span><strong>${escapeHtml(decision.decision || run.decision || 'Pending')}</strong></div>
+            <div class="detail-stat"><span>Training</span><strong>${formatScore(decision.training_score ?? run.composite_score)}</strong></div>
+            <div class="detail-stat"><span>Validation</span><strong>${formatScore(decision.validation_score ?? run.holdout_composite)}</strong></div>
+            <div class="detail-stat"><span>Confidence</span><strong>${verdict.confidence ? pct(verdict.confidence) : '—'}</strong></div>
+            <div class="detail-stat"><span>Duration</span><strong>${decision.elapsed_seconds ? formatDurationSecs(decision.elapsed_seconds) : '—'}</strong></div>
+            <div class="detail-stat"><span>Cost</span><strong>${decision.estimated_cost_usd != null ? '$' + Number(decision.estimated_cost_usd).toFixed(3) : '—'}</strong></div>
+          </div>
+          <h3>Why this decision</h3><div class="reason-box">${escapeHtml(decision.reason || 'Detailed rationale was not recorded for this historical run.')}
+          ${validation.reason ? `<p><b>Validation:</b> ${escapeHtml(validation.reason)}</p>` : ''}</div>
+          <h3>Instruction diff</h3><pre class="diff">${escapeHtml(data.diff || 'Instruction snapshot unavailable for this run.')}</pre>
+          <h3>Weakest samples and judge feedback</h3>${samples || '<div class="reason-box">Sample artifacts unavailable for this run.</div>'}`;
+    } catch (error) {
+        document.getElementById('detailBody').innerHTML = `<div class="reason-box">${escapeHtml(error.message)}</div>`;
+    }
+}
+async function openComparison() {
+    const backdrop = document.getElementById('detailBackdrop');
+    backdrop.classList.add('open');
+    document.getElementById('detailTitle').textContent = 'Baseline → confirmed best';
+    document.getElementById('detailSubtitle').textContent = 'Loading campaign comparison…';
+    document.getElementById('detailBody').innerHTML = '';
+    try {
+        const response = await fetch('/api/compare');
+        if (!response.ok) throw new Error('Run a baseline and at least one confirmed experiment to compare them.');
+        const data = await response.json();
+        const metricRows = (data.metrics || []).map(metric => `<tr><td>${escapeHtml(metric.label)}</td><td>${formatScore(metric.baseline)}</td><td>${formatScore(metric.best)}</td><td>${metric.delta >= 0 ? '+' : ''}${pct(metric.delta)}</td></tr>`).join('');
+        document.getElementById('detailSubtitle').textContent = `${data.baseline.run_id} compared with ${data.best.run_id}`;
+        document.getElementById('detailBody').innerHTML = `
+          <div class="detail-grid">
+            <div class="detail-stat"><span>Baseline</span><strong>${formatScore(data.baseline.composite_score)}</strong></div>
+            <div class="detail-stat"><span>Best</span><strong>${formatScore(data.best.composite_score)}</strong></div>
+            <div class="detail-stat"><span>Improvement</span><strong>${data.delta >= 0 ? '+' : ''}${pct(data.delta)}</strong></div>
+          </div>
+          <h3>Metric movement</h3><div class="card history-table"><table><thead><tr><th>Metric</th><th>Baseline</th><th>Best</th><th>Change</th></tr></thead><tbody>${metricRows}</tbody></table></div>
+          <h3>Full instruction diff</h3><pre class="diff">${escapeHtml(data.diff || 'Instruction snapshots are unavailable for this imported campaign.')}</pre>`;
+    } catch (error) {
+        document.getElementById('detailBody').innerHTML = `<div class="reason-box">${escapeHtml(error.message)}</div>`;
+    }
+}
+function closeDetail(event) {
+    if (event && event.target !== document.getElementById('detailBackdrop')) return;
+    document.getElementById('detailBackdrop').classList.remove('open');
+}
 
 function togglePause() {
     polling = !polling;
@@ -871,8 +1180,10 @@ async function fetchData() {
 
 function dataHash(data) {
     const runStatus = data.run_status ? data.run_status.status + "_" + (data.run_status.current_iteration || 0) : "";
+    const decisions = data.runs.map(r => r.decision || '').join(',');
     return data.runs.length + "_" + (data.latest ? data.latest.composite_score : 0) + "_" +
-        (data.final_test ? data.final_test.score : "pending") + "_" + runStatus;
+        (data.final_test ? data.final_test.score : "pending") + "_" + runStatus + "_" +
+        decisions + "_" + JSON.stringify(data.campaign || {});
 }
 
 function formatDuration(ms) {
@@ -941,7 +1252,15 @@ function updateHeader(data) {
         const delta = data.final_test.delta;
         document.getElementById("hdr-final-delta").textContent =
             delta == null ? "Baseline unavailable" : ((delta >= 0 ? "+" : "") + (delta * 100).toFixed(1) + "% vs baseline");
+    } else if (data.runs.length) {
+        document.getElementById("hdr-final-delta").textContent = "Locked until finalize";
     }
+    const campaign = data.campaign || {};
+    document.getElementById('campaignPill').textContent = `${campaign.name || 'Campaign'} · ${(campaign.status || 'not started').replaceAll('_',' ')}`;
+    document.getElementById('reportAction').style.display = campaign.status === 'demo' ? 'none' : '';
+    document.getElementById('finalizeAction').style.display = campaign.finalized || campaign.status === 'demo' ? 'none' : '';
+    const cost = data.run_status && data.run_status.cost_usd;
+    document.getElementById('hdr-cost').textContent = cost != null ? '$' + Number(cost).toFixed(2) : '—';
 
     // Fallback: use change_description if decision is null (legacy data)
     const getDecision = r => (r.decision || r.change_description || '').toLowerCase();
@@ -951,6 +1270,22 @@ function updateHeader(data) {
         document.getElementById("hdr-keep-rate").textContent =
             keeps + "/" + total + " kept (" + Math.round(keeps/total*100) + "%)";
     }
+}
+
+function updateOutcome(data) {
+    const card = document.getElementById('outcomeCard');
+    const campaign = data.campaign || {};
+    if (!data.final_test && !campaign.finalized) { card.classList.remove('visible'); return; }
+    if (!data.final_test) {
+        document.getElementById('outcomeScore').textContent = data.best ? pctInt(data.best.composite_score) : 'Done';
+        document.getElementById('outcomeText').textContent = 'Campaign closed without a configured final-test split. Copy, download, or install the confirmed best above.';
+        card.classList.add('visible'); return;
+    }
+    const delta = data.final_test.delta;
+    const kept = data.runs.filter(run => (run.decision || '').toUpperCase() === 'KEEP').length;
+    document.getElementById('outcomeScore').textContent = pctInt(data.final_test.score);
+    document.getElementById('outcomeText').textContent = `${kept} improvement${kept === 1 ? '' : 's'} kept · ${delta == null ? 'final audit complete' : `${delta >= 0 ? '+' : ''}${(delta * 100).toFixed(1)}% on untouched final prompts`} · copy, download, or install the confirmed best above.`;
+    card.classList.add('visible');
 }
 
 function getPointColors(runs) {
@@ -982,6 +1317,7 @@ function createCompositeChart(data) {
     const trendLine = scores.map((_, i) => slope * i + intercept);
     const bandUpper = data.runs.map(r => (r.composite_score + (r.composite_stddev || 0)) * 100);
     const bandLower = data.runs.map(r => (r.composite_score - (r.composite_stddev || 0)) * 100);
+    document.getElementById('compositeSummary').textContent = data.runs.map(r => `${r.run_id}: ${pct(r.composite_score)}, ${r.decision || 'pending'}`).join('; ');
 
     compositeChart = new Chart(ctx, {
         type: "line",
@@ -1097,6 +1433,7 @@ function updateCompositeChart(data) {
     compositeChart.data.datasets[2].data = data.runs.map(r => (r.composite_score + (r.composite_stddev || 0)) * 100);
     compositeChart.data.datasets[3].data = data.runs.map(r => (r.composite_score - (r.composite_stddev || 0)) * 100);
     compositeChart.update("none");
+    document.getElementById('compositeSummary').textContent = data.runs.map(r => `${r.run_id}: ${pct(r.composite_score)}, ${r.decision || 'pending'}`).join('; ');
 }
 
 function createMetricGrid(data) {
@@ -1233,16 +1570,23 @@ function updateChangeLog(data) {
         return;
     }
 
-    // Show most recent first, find previous score for each
+    const incumbentBefore = index => {
+        for (let i = index - 1; i >= 0; i--) {
+            const decision = getDecision(data.runs[i]);
+            if (decision === 'keep' || decision === 'baseline') return data.runs[i].composite_score;
+        }
+        return data.runs[index].composite_score;
+    };
+    // Show each KEEP against the confirmed incumbent it actually replaced.
     log.innerHTML = [...keeps].reverse().map(r => {
         const idx = data.runs.indexOf(r);
-        const prevScore = idx > 0 ? data.runs[idx - 1].composite_score : r.composite_score;
+        const prevScore = incumbentBefore(idx);
         const gain = r.composite_score - prevScore;
         const gainStr = gain > 0 ? '+' + (gain * 100).toFixed(1) + '%' : '';
 
-        return `<div class="change-entry">
+        return `<div class="change-entry" role="listitem">
             <div class="change-header">
-                <div class="change-id">${r.run_id}</div>
+                <button class="row-link change-id" onclick="openDetail('${escapeHtml(r.run_id)}')">${escapeHtml(r.run_id)}</button>
                 <div class="change-score">
                     <span class="before">${pctInt(prevScore)}</span>
                     <span class="arrow">&rarr;</span>
@@ -1250,7 +1594,7 @@ function updateChangeLog(data) {
                     ${gainStr ? `<span class="gain">${gainStr}</span>` : ''}
                 </div>
             </div>
-            <div class="change-desc">${r.change_description}</div>
+            <div class="change-desc">${escapeHtml(r.change_description)}</div>
         </div>`;
     }).join('');
 }
@@ -1262,24 +1606,32 @@ function updateHistoryTable(data) {
     tbody.innerHTML = rows.map((r, i) => {
         const dc = (r.decision || r.change_description || '').toLowerCase();
         const badgeClass = dc === "keep" ? "keep" : dc === "discard" ? "discard" : "baseline";
-        const nextRun = i < rows.length - 1 ? rows[i + 1] : null;
-        const delta = nextRun ? r.composite_score - nextRun.composite_score : 0;
+        const originalIndex = data.runs.indexOf(r);
+        let incumbent = null;
+        for (let j = originalIndex - 1; j >= 0; j--) {
+            const priorDecision = (data.runs[j].decision || '').toLowerCase();
+            if (priorDecision === 'keep' || priorDecision === 'baseline') {
+                incumbent = data.runs[j]; break;
+            }
+        }
+        const delta = incumbent ? r.composite_score - incumbent.composite_score : 0;
         const deltaStr = delta === 0 ? "\u2014" :
             (delta >= 0 ? "+" : "") + (delta * 100).toFixed(1) + "%";
         const deltaColor = delta > 0 ? "color:var(--green)" : delta < 0 ? "color:var(--red)" : "color:var(--text-muted)";
 
         return `<tr>
-            <td style="font-weight:600;color:var(--text-primary)">${r.run_id}</td>
+            <td><button class="row-link" onclick="openDetail('${escapeHtml(r.run_id)}')">${escapeHtml(r.run_id)}</button></td>
             <td class="score-cell">${pctInt(r.composite_score)}</td>
             <td style="${deltaColor};font-size:12px;font-weight:600">${deltaStr}</td>
-            <td><span class="badge ${badgeClass}">${r.decision || "\u2014"}</span></td>
-            <td class="desc-cell" title="${r.change_description}">${r.change_description || "\u2014"}</td>
+            <td><span class="badge ${badgeClass}">${escapeHtml(r.decision || "\u2014")}</span></td>
+            <td class="desc-cell" title="${escapeHtml(r.change_description)}">${escapeHtml(r.change_description || "\u2014")}</td>
         </tr>`;
     }).join("");
 }
 
 function formatDurationSecs(seconds) {
     if (!seconds || seconds <= 0) return "\u2014";
+    if (seconds < 60) return Math.round(seconds) + "s";
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     if (h > 0) return h + "h " + m + "m";
@@ -1319,6 +1671,7 @@ function updateDashboard(data) {
     updateRunProgress(data);
 
     updateHeader(data);
+    updateOutcome(data);
     updateElapsed(data);
     updateCompositeChart(data);
     updateMetricGrid(data);
@@ -1363,6 +1716,17 @@ poll();
 class DashboardHandler(BaseHTTPRequestHandler):
     tsv_path = str(DEFAULT_TSV)
     metric_config = {}
+    demo_mode = False
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+        )
+        super().end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -1373,14 +1737,93 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(DASHBOARD_HTML.encode("utf-8"))
 
+        elif parsed.path == "/static/chart.js":
+            asset = PROJECT_ROOT / "vendor" / "chart.umd.min.js"
+            if not asset.exists():
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = asset.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(body)
+
         elif parsed.path == "/api/results":
             data = read_tsv(self.tsv_path, self.metric_config)
-            data["run_status"] = read_status()
-            data["final_test"] = read_final_test()
+            data["run_status"] = {} if self.demo_mode else read_status()
+            data["final_test"] = None if self.demo_mode else read_final_test()
+            data["campaign"] = (
+                {"name": "Bundled writing-style demo", "status": "demo", "finalized": False}
+                if self.demo_mode else read_campaign()
+            )
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif parsed.path == "/api/experiment":
+            run_id = parse_qs(parsed.query).get("run_id", [""])[0]
+            try:
+                data = read_experiment_detail(run_id, self.tsv_path, self.metric_config)
+            except (ValueError, FileNotFoundError):
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif parsed.path == "/api/compare":
+            try:
+                data = read_campaign_comparison(self.tsv_path, self.metric_config)
+            except FileNotFoundError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            if self.demo_mode:
+                data["diff"] = ""
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif parsed.path == "/api/file":
+            name = parse_qs(parsed.query).get("name", [""])[0]
+            if name == "best":
+                path = (
+                    PROJECT_ROOT / "examples/writing-style/SKILL.md"
+                    if self.demo_mode else PROJECT_ROOT / "SKILL.md.best"
+                )
+                download_name = "SKILL.md.best"
+            elif name == "report":
+                if self.demo_mode:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                path = PROJECT_ROOT / ".tmp" / "run-summary.md"
+                download_name = "autoevaluation-report.md"
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            if not path.exists():
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            if "raw=1" not in parsed.query:
+                self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
             self.end_headers()
             self.wfile.write(body)
 
@@ -1397,16 +1840,22 @@ def main():
     parser.add_argument("--port", type=int, default=8050, help="Port to serve on (default: 8050)")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
     parser.add_argument("--tsv", default=str(DEFAULT_TSV), help="Path to results.tsv")
+    parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"), help="Config used for metric labels")
+    parser.add_argument("--demo", action="store_true", help="Label the dashboard as a read-only bundled demo")
+    parser.add_argument("--open", action="store_true", help="Open the dashboard in the default browser")
     args = parser.parse_args()
 
-    metric_config = load_config()
+    metric_config = load_config(args.config)
     DashboardHandler.tsv_path = args.tsv
     DashboardHandler.metric_config = metric_config
+    DashboardHandler.demo_mode = args.demo
 
     server = HTTPServer((args.host, args.port), DashboardHandler)
     print(f"Dashboard running at http://{args.host}:{args.port}")
     print(f"Reading data from: {args.tsv}")
     print(f"Press Ctrl+C to stop\n")
+    if args.open:
+        threading.Timer(0.4, lambda: webbrowser.open(f"http://{args.host}:{args.port}")).start()
 
     try:
         server.serve_forever()

@@ -1,328 +1,116 @@
 # Getting Started with AutoEvaluation
 
-This tutorial walks you through AutoEvaluation from scratch: clone → setup → first run → reading results. You'll have a working optimisation loop in about 15 minutes.
+This tutorial takes you from clone to a reviewed, finalized skill campaign. Budget about 15 minutes for setup; evaluation time depends on the model and campaign size.
 
-## What You'll Build
-
-By the end, you'll have:
-- A local clone of AutoEvaluation
-- A configured API key (Gemini, OpenAI, or Anthropic)
-- Your first optimisation loop running
-- A baseline score and at least one improved iteration
-
----
-
-## Step 1: Clone the Repository
-
-Get the code on your machine:
+## 1. Clone and install
 
 ```bash
 git clone https://github.com/AdenCJM/AutoEvaluation.git
 cd AutoEvaluation
+python3 -m pip install -r requirements.txt
 ```
 
-This creates a directory with everything you need: the loop orchestrator, config templates, and example skills.
+AutoEvaluation supports Gemini, OpenAI, and Anthropic. Create an API key with your chosen provider before setup.
 
----
+## 2. Configure your campaign
 
-## Step 2: Get an API Key
-
-AutoEvaluation needs an LLM API key. Pick one:
-
-**Option A: Gemini (Recommended for beginners)**
-
-- Go to [Google AI Studio](https://aistudio.google.com/apikey)
-- Click "Create API Key"
-- Copy the key
-
-**Option B: OpenAI**
-
-- Go to [OpenAI API Keys](https://platform.openai.com/api/keys)
-- Click "Create new secret key"
-- Copy the key
-
-**Option C: Anthropic**
-
-- Go to [Anthropic Console](https://console.anthropic.com/account/keys)
-- Click "Create Key"
-- Copy the key
-
-For this tutorial, we'll use Gemini. If you chose a different provider, substitute the model name and key below.
-
----
-
-## Step 3: Create `.env` with Your API Key
-
-In your `AutoEvaluation` directory, create a `.env` file:
+Run the guided setup:
 
 ```bash
-# Create the file:
-echo "GEMINI_API_KEY=your-actual-key-here" > .env
+python3 autoeval.py init
 ```
 
-Replace `your-actual-key-here` with the key you just copied. Don't put quotes around the key.
+The setup workbench:
 
-Verify it was created:
+1. Chooses the generation and judge models.
+2. Accepts your existing `SKILL.md` or creates one from your description.
+3. Generates about 30 test scenarios.
+4. Shows prompt coverage, duplicates, and the train/validation/final-test split.
+5. Lets you edit, delete, regenerate, and add scenarios before accepting them.
+6. Reviews the rubric, warns about hard-to-observe criteria, and estimates campaign usage.
+7. Runs preflight validation before writing the configuration.
+
+Your API key is entered with hidden input and written only to the gitignored `.env` file. To verify the variable exists without printing the secret:
 
 ```bash
-cat .env
-# Should print: GEMINI_API_KEY=AIza...
+python3 -c "from pathlib import Path; print(any(line.startswith(('GEMINI_API_KEY=', 'OPENAI_API_KEY=', 'ANTHROPIC_API_KEY=')) for line in Path('.env').read_text().splitlines()))"
 ```
 
-**Important:** `.env` is in `.gitignore`, so it won't accidentally be committed to GitHub.
-
----
-
-## Step 4: Copy the Example Skill
-
-AutoEvaluation ships with a complete working example: a writing style guide. Let's use it:
+For a non-interactive local scaffold with safe defaults:
 
 ```bash
-# Copy the example files:
-cp examples/writing-style/SKILL.md SKILL.md
-cp examples/writing-style/config.yaml config.yaml
-cp examples/writing-style/prompts.json prompts/prompts.json
-cp examples/writing-style/eval_deterministic.py tools/eval_deterministic.py
+python3 autoeval.py init --defaults
 ```
 
-This gives you:
-- **SKILL.md** — the writing style guide you'll optimise
-- **config.yaml** — settings (model, evaluation rubric, iteration limits)
-- **prompts.json** — 30 diverse scenarios split across training, validation, and untouched final testing
-- **eval_deterministic.py** — rule-based evaluation metrics (e.g., checking for banned words)
-
-Let's verify they're in place:
+## 3. Run the first segment
 
 ```bash
-ls -la SKILL.md config.yaml prompts/prompts.json
-# Should all exist
+python3 autoeval.py run --iterations 3
 ```
 
----
+The driver establishes a baseline, makes one attributable instruction change per experiment, evaluates repeated samples, and keeps only changes that pass the configured statistical and validation gates. It records:
 
-## Step 5: Run Your First Optimisation
+- `results.tsv` — append-only experiment history
+- `SKILL.md.best` — confirmed best instruction
+- `.tmp/evals/<run>/decision.json` — rationale, confidence, duration, and estimated cost
+- `.tmp/run_status.json` — live campaign progress
 
-Now you're ready to optimise! Run the headless loop:
+An ordinary run segment does **not** consume the untouched final-test split. You can safely inspect or resume the active campaign.
+
+## 4. Inspect the evidence
 
 ```bash
-python3 tools/run_loop.py --iterations 3
+python3 autoeval.py status
+python3 autoeval.py dashboard --open
 ```
 
-This command:
-- Generates test outputs using your current SKILL.md
-- Judges each output (LLM evaluates them blind)
-- Calculates a baseline score
-- Runs 3 iterations of analysis → modify → evaluate → decide
-- Saves results to `results.tsv`
+The dashboard shows the score trend, per-metric movement, campaign cost, KEEP/DISCARD history, and the weakest samples behind each decision. Select an experiment for its rationale and exact instruction diff, or choose **Compare baseline and best** for the full campaign change.
 
-**Expected output:**
-
-```
-Loading config from config.yaml...
-SKILL_PATH: SKILL.md
-RESULTS_TSV: results.tsv
-
-[1/3] Generating samples...
-  [1/5] Generating: writing_tone (task: write a paragraph explaining...)...done (184 words, 3.2s)
-  [2/5] Generating: use_contractions (task: write a short guide on using contractions)...done (156 words, 2.8s)
-  ...
-[2/3] Running LLM judge evaluation...
-[3/3] Aggregating scores...
-
-═══════════════════════════════════════════════════════════
-COMPOSITE SCORE: 0.8358
-═══════════════════════════════════════════════════════════
-  human_score: 0.88
-  task_accuracy: 0.82
-  quality: 0.81
-
-Baseline saved.
-
-═══════════════════════════════════════════════════════════
-Running exp_001...
-
-Enriched context: 2 worst samples: writing_tone, use_contractions
-Analysing weaknesses and modifying skill...
-Change: Added emphasis on natural language patterns in contractions
-Running exp_001...
-COMPOSITE SCORE: 0.7768
-
-✗ DISCARD — score did not improve (0.7768 < best 0.8358)
-
-═══════════════════════════════════════════════════════════
-Running exp_002...
-
-Enriched context: 2 worst samples: writing_tone, use_contractions
-Analysing weaknesses and modifying skill...
-Change: Clarified the guidance on parallel structures
-Running exp_002...
-COMPOSITE SCORE: 0.8597
-
-✓ KEEP — score improved 0.8358 → 0.8597 (delta 0.0239)
-
-═══════════════════════════════════════════════════════════
-Running exp_003...
-
-...
-
-═══════════════════════════════════════════════════════════
-Optimisation complete — 3 iterations in 4m 12s
-Best score: 0.8597 (+0.0239 from baseline)
-Kept changes: 1
-Results saved to results.tsv
-═══════════════════════════════════════════════════════════
-```
-
-That's it! Your first optimisation loop completed. The system ran 3 experiments, kept 1 change, and improved your skill's score by +2.39%.
-
----
-
-## Step 6: Review the Results
-
-Let's see what happened:
-
-**Check the full result history:**
+No key is required to explore the bundled read-only product demo:
 
 ```bash
-cat results.tsv
+python3 autoeval.py demo --open
 ```
 
-Output will show:
+## 5. Continue, then finalize once
 
-```
-run_id      composite_score  decision
-baseline    0.8358           BASELINE
-exp_001     0.7768           DISCARD
-exp_002     0.8597           KEEP
-exp_003     0.8400           DISCARD
-```
-
-- **baseline**: Your starting score (0.8358)
-- **exp_001**: Tried a change, score dropped → DISCARD
-- **exp_002**: Tried a different change, score improved → KEEP
-- **exp_003**: Tried another change, score stayed similar → DISCARD
-
-**Check which change was kept:**
+Each `--iterations` value is the number of additional attempts in that segment:
 
 ```bash
-git diff SKILL.md.best SKILL.md
+python3 autoeval.py run --iterations 10
 ```
 
-Wait, both files are the same now? That's expected! When you KEEP a change, the system stores it in `SKILL.md.best`. After each experiment, `SKILL.md` either stays (if KEEP) or reverts (if DISCARD).
-
-**Read the best skill:**
+When you are genuinely finished tuning, explicitly consume the untouched final-test split once:
 
 ```bash
-cat SKILL.md.best
+python3 autoeval.py finalize
 ```
 
-This is your optimised skill — the best version found so far. It has the kept changes from exp_002.
+Finalization writes the baseline/final audit and `.tmp/run-summary.md`. The dashboard then becomes a handoff screen where you can compare, copy, download, or install the confirmed best.
 
----
-
-## Step 7: Run More Iterations (Optional)
-
-Want to keep optimising? Run more iterations:
+Do not continue tuning after inspecting the final test. Start a fresh campaign instead:
 
 ```bash
-python3 tools/run_loop.py --iterations 10
+python3 autoeval.py new --name "Second independent campaign"
 ```
 
-The loop will:
-- Read the best score from `results.tsv` (currently 0.8597)
-- Load `SKILL.md.best` as the starting point
-- Run 7 more iterations (10 total, 3 already done)
-- Keep trying to improve the score
+This archives the completed campaign under `campaigns/<campaign-id>/`, clears active runtime state, and seeds the new campaign from the prior confirmed best.
 
----
+## 6. Run your own benchmark
 
-## What Just Happened?
-
-Here's the flow your first run executed:
-
-1. **Baseline** — evaluated your SKILL.md as-is
-2. **Iteration 1 (exp_001)** — read the judge's reasoning, identified weak areas, made one targeted change
-3. **Evaluate** — scored the modified skill
-4. **Decide** — score didn't improve → reverted to baseline
-5. **Repeat** for iterations 2–3
-
-The system is **hill-climbing**: each iteration tries one change, keeps it if the score improves, and reverts if not.
-
----
-
-## Next Steps
-
-### Run with Your Own Skill
-
-Want to optimise your own instructions? 
+For repeatable evidence across independent campaigns, start with a dry run:
 
 ```bash
-# Option 1: Replace SKILL.md
-cp /path/to/your/skill.md SKILL.md
-
-# Option 2: Use the setup wizard
-python3 setup.py
+python3 autoeval.py benchmark --campaigns 3 --iterations 10
 ```
 
-The setup wizard will ask you to:
-1. Pick your LLM provider
-2. Paste or describe your skill
-3. Enter test scenarios (or let AI generate them)
-4. Choose evaluation metrics
-5. Set iteration limits
+Add `--execute` only after reviewing the estimated work. Each benchmark campaign runs in an isolated workspace and produces its own final-test result.
 
-### Configure Advanced Features
+## Next steps
 
-Open `config.yaml` and try:
+- [Configuration reference](CONFIG_REFERENCE.md) — models, limits, statistical gates, and split settings
+- [Architecture](ARCHITECTURE.md) — experiment and campaign state machines
+- [Scheduled runs](SCHEDULED_RUNS.md) — safe unattended segments
+- [Troubleshooting](TROUBLESHOOTING.md) — recovery and diagnostics
 
-- **`max_concurrent: 4`** — run 4 LLM calls in parallel (faster but costs more)
-- **`judge_provider`/`judge_model`** — use a separate, cheaper model (e.g. `claude-haiku-4-5`) as the judge (better signal, no self-judging bias)
-- **`replicates_per_prompt: 3`** — completions per prompt per experiment, so KEEP/DISCARD decisions account for score variance
-- **`convergence_window: 10`** — stop after 10 iterations with no improvement (saves API cost)
-
-See the [Configuration Guide](CONFIG_REFERENCE.md) for details.
-
-### Watch the Dashboard (Optional)
-
-In a separate terminal:
-
-```bash
-python3 tools/dashboard_server.py
-```
-
-Then open http://localhost:8050 in your browser to watch scores in real-time.
-
-### Use Claude Code for Autonomous Mode
-
-If you have [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, `start.sh` automatically installs the `/autoeval` skill into `~/.claude/skills/`. Inside Claude Code, run:
-
-```
-/autoeval
-```
-
-This walks through conversational setup, a live dashboard, then the crash-safe headless driver. `program.md` is the runbook; `tools/run_loop.py` owns all state transitions.
-
-See [Troubleshooting](TROUBLESHOOTING.md) if the skill isn't picked up.
-
----
-
-## You've Built This
-
-You now have:
-
-✅ A cloned repo with working tools  
-✅ An API key configured and tested  
-✅ A baseline score for your skill  
-✅ At least one experiment that improved the score  
-✅ A `results.tsv` history you can inspect  
-✅ A best skill (`SKILL.md.best`) you can use  
-
-**From here:**
-
-- **Keep optimising** → Run more iterations until the score plateaus
-- **Switch to your own skill** → Repeat with your own instructions
-- **Read the architecture** → See [Architecture & Design](ARCHITECTURE.md) to understand why things work this way
-- **Troubleshoot issues** → Check [Troubleshooting Guide](TROUBLESHOOTING.md) if something breaks
-- **Explore advanced features** → See README.md for parallel execution, custom metrics, GitHub Actions, etc.
-
-Good luck! 🚀
+The supported product path is `autoeval.py`; it delegates experiment execution to `tools/run_loop.py`, the state-machine source of truth.

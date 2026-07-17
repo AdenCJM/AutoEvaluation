@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import results_io
+from campaigns import ensure_manifest, update_manifest
 from decision import decide
 from model_client import ModelClient
 from run_state import atomic_write_text, read_state, run_lock, write_state
@@ -198,6 +199,12 @@ def save_best_aggregates(train_agg: dict, holdout_agg: dict | None) -> None:
     atomic_write_text(BEST_AGG_PATH, json.dumps(train_agg, indent=2) + "\n")
     if holdout_agg is not None:
         atomic_write_text(BEST_HOLDOUT_AGG_PATH, json.dumps(holdout_agg, indent=2) + "\n")
+
+
+def write_decision_record(run_id: str, payload: dict) -> None:
+    """Persist the full decision rationale for the dashboard and audit trail."""
+    path = PROJECT_ROOT / ".tmp" / "evals" / run_id / "decision.json"
+    atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
 
 
 def run_final_test(run_id: str, cfg: dict) -> dict | None:
@@ -711,9 +718,9 @@ def _quick_start_config(args) -> dict:
         "results_tsv": "results.tsv",
         "max_iterations": iterations,
         "max_hours": hours,
-        "max_cost_usd": 0,
+        "max_cost_usd": 10,
         "convergence_window": 0,
-        "max_concurrent": 1,
+        "max_concurrent": 4,
         "judge_sees_skill": True,
         "replicates_per_prompt": 3,
         "accept_rule": "paired",
@@ -759,8 +766,9 @@ With existing config:
     parser.add_argument("--prompts", type=str, help="Path to prompts JSON file (default: prompts/prompts.json)")
     parser.add_argument("--measure-noise", type=int, default=0, metavar="N",
                         help="Evaluate the current SKILL.md N times with no edits and report the score noise floor, then exit")
-    parser.add_argument("--skip-final-test", action="store_true",
-                        help="Leave the final-test split untouched for a later campaign-finalising run")
+    parser.add_argument("--finalize", action="store_true",
+                        help="Consume the untouched final test and close the active campaign")
+    parser.add_argument("--skip-final-test", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     # Quick-start mode: --skill and --provider given, no config.yaml needed
@@ -783,6 +791,7 @@ With existing config:
     skill_path = PROJECT_ROOT / cfg.get("skill_path", "SKILL.md")
     skill_best = PROJECT_ROOT / "SKILL.md.best"
     results_tsv = PROJECT_ROOT / cfg.get("results_tsv", "results.tsv")
+    manifest = ensure_manifest()
 
     prompts = json.loads((PROJECT_ROOT / cfg.get("prompts_path", "prompts/prompts.json")).read_text(encoding="utf-8"))
     validate_prompts(prompts)
@@ -802,7 +811,32 @@ With existing config:
             file=sys.stderr,
         )
 
-    if FINAL_TEST_AGG_PATH.exists() and results_tsv.exists():
+    if args.finalize:
+        if not results_tsv.exists() or not skill_best.exists():
+            print("Error: no active campaign to finalize. Run at least a baseline first.", file=sys.stderr)
+            sys.exit(1)
+        if FINAL_TEST_AGG_PATH.exists() or manifest.get("status") == "finalized":
+            print("Campaign is already finalized. Start another with: python3 autoeval.py new")
+            return
+        start_time = time.time()
+        print("Finalizing campaign — running the untouched final test once...")
+        final_test = run_final_test("final_test", cfg)
+        if final_test is None and final_prompts:
+            print("Final-test evaluation failed; campaign remains open.", file=sys.stderr)
+            sys.exit(1)
+        if final_test:
+            atomic_write_text(FINAL_TEST_AGG_PATH, json.dumps(final_test, indent=2) + "\n")
+        _write_status("finalized", "final_test", 0, 0, start_time, [], client)
+        write_state("finalized", campaign_id=manifest.get("id"))
+        update_manifest(
+            status="finalized",
+            finalized_at=datetime.now().isoformat(),
+            final_test_score=final_test.get("composite_score") if final_test else None,
+        )
+        print_run_summary(results_tsv, start_time, client, 0, final_test=final_test)
+        return
+
+    if (FINAL_TEST_AGG_PATH.exists() or manifest.get("status") == "finalized") and results_tsv.exists():
         print(
             "Error: this campaign has already consumed its untouched final-test split. "
             "Start a fresh campaign with new final-test prompts before further optimisation.",
@@ -841,11 +875,7 @@ With existing config:
     consecutive_failures = 0
     iterations_since_improvement = 0
     iteration_costs = []
-    campaign_complete = True
-
-    # Clear stale token usage logs from prior runs
-    for old_log in (PROJECT_ROOT / ".tmp").glob("token_usage_*.jsonl"):
-        old_log.unlink(missing_ok=True)
+    update_manifest(status="active", last_started_at=datetime.now().isoformat())
 
     recover_incomplete_run(skill_path, skill_best, results_tsv)
 
@@ -859,10 +889,19 @@ With existing config:
             print("Baseline experiment failed — cannot start the loop.", file=sys.stderr)
             sys.exit(1)
         atomic_write_text(skill_best, skill_path.read_text(encoding="utf-8"))
+        skills_dir = PROJECT_ROOT / ".tmp" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(skills_dir / "baseline.md", skill_path.read_text(encoding="utf-8"))
         base_holdout = run_holdout_check("baseline", cfg)
         save_best_aggregates(base_agg, base_holdout)
         update_decision(results_tsv, "BASELINE",
                         base_holdout["composite_score"] if base_holdout else None)
+        write_decision_record("baseline", {
+            "decision": "BASELINE",
+            "reason": "Initial campaign baseline",
+            "training_score": base_agg.get("composite_score"),
+            "validation_score": base_holdout.get("composite_score") if base_holdout else None,
+        })
         base_final = run_final_test("baseline_final_test", cfg)
         if base_final:
             atomic_write_text(
@@ -944,7 +983,6 @@ With existing config:
                 print("3 consecutive experiment failures — aborting run. "
                       "Fix the eval pipeline (API key? judge model?) and re-run to resume.",
                       file=sys.stderr)
-                campaign_complete = False
                 break
             print(f"Experiment failed ({consecutive_failures}/3), retrying...")
             continue
@@ -969,6 +1007,7 @@ With existing config:
         # only helps the prompts it was optimised on is overfitting, not a win
         holdout_agg = None
         holdout_score = None
+        holdout_verdict = None
         if keep and float(cfg.get("holdout_fraction", 0)) > 0:
             print("Train-set improvement found — validating on holdout prompts...")
             holdout_agg = run_holdout_check(run_id, cfg)
@@ -977,10 +1016,10 @@ With existing config:
             else:
                 holdout_score = holdout_agg["composite_score"]
                 best_holdout = load_best_aggregate(BEST_HOLDOUT_AGG_PATH, results_tsv)
-                hv = decide(holdout_agg, best_holdout, cfg, mode="non-regression")
-                print(f"Holdout check: {hv['reason']}")
-                if not hv["keep"]:
-                    keep, reason = False, f"holdout regression — {hv['reason']}"
+                holdout_verdict = decide(holdout_agg, best_holdout, cfg, mode="non-regression")
+                print(f"Holdout check: {holdout_verdict['reason']}")
+                if not holdout_verdict["keep"]:
+                    keep, reason = False, f"holdout regression — {holdout_verdict['reason']}"
 
         if keep:
             print(f"KEEP — {best_score:.4f} → {new_score:.4f} ({reason})")
@@ -997,12 +1036,6 @@ With existing config:
             consecutive_discards += 1
             iterations_since_improvement += 1
 
-        write_state("idle", run_id=run_id, decision="KEEP" if keep else "DISCARD")
-        clear_recovery_snapshot(run_id)
-
-        if consecutive_discards >= 5:
-            print("5 consecutive discards detected — next iteration will use radical approach.")
-
         # Per-iteration timing and progress
         iter_elapsed = time.time() - iter_start
         iter_times.append(iter_elapsed)
@@ -1012,7 +1045,25 @@ With existing config:
         remaining = max_iterations - iteration if max_iterations else 0
         eta_m = int(avg_secs * remaining / 60) if remaining > 0 else 0
         cost = get_total_cost(client)
-        iteration_costs.append(max(0.0, cost - total_cost))
+        iteration_cost = max(0.0, cost - total_cost)
+        iteration_costs.append(iteration_cost)
+        write_decision_record(run_id, {
+            "decision": "KEEP" if keep else "DISCARD",
+            "reason": reason,
+            "change": description,
+            "previous_best_score": best_score,
+            "training_score": new_score,
+            "validation_score": holdout_score,
+            "training_verdict": verdict,
+            "validation_verdict": holdout_verdict,
+            "elapsed_seconds": round(iter_elapsed, 3),
+            "estimated_cost_usd": round(iteration_cost, 6),
+        })
+        write_state("idle", run_id=run_id, decision="KEEP" if keep else "DISCARD")
+        clear_recovery_snapshot(run_id)
+
+        if consecutive_discards >= 5:
+            print("5 consecutive discards detected — next iteration will use radical approach.")
 
         eta_str = f"~{eta_m} min remaining · " if max_iterations and remaining > 0 else ""
         print(f"\n  {run_id} completed in {iter_m}m {iter_s}s")
@@ -1020,12 +1071,28 @@ With existing config:
 
         _write_status("running", run_id, iteration, max_iterations, start_time, iter_times, client)
 
-    final_test = None if args.skip_final_test or not campaign_complete else run_final_test("final_test", cfg)
-    if final_test:
-        atomic_write_text(FINAL_TEST_AGG_PATH, json.dumps(final_test, indent=2) + "\n")
-    _write_status("complete", "", iteration - 1, max_iterations, start_time, iter_times, client)
-    write_state("complete", iterations=iteration - 1)
-    print_run_summary(results_tsv, start_time, client, iteration - 1, final_test=final_test)
+    # Direct driver calls retain the historical auto-finalization behaviour
+    # documented in program.md. The unified CLI always supplies the hidden
+    # skip flag and exposes an explicit `autoeval finalize` product action.
+    final_test = None
+    if not args.skip_final_test:
+        final_test = run_final_test("final_test", cfg)
+        if final_test:
+            atomic_write_text(FINAL_TEST_AGG_PATH, json.dumps(final_test, indent=2) + "\n")
+        if final_test or not final_prompts:
+            _write_status("finalized", "", iteration - 1, max_iterations, start_time, iter_times, client)
+            write_state("finalized", iterations=iteration - 1, campaign_id=manifest.get("id"))
+            update_manifest(status="finalized", finalized_at=datetime.now().isoformat())
+            print_run_summary(results_tsv, start_time, client, iteration - 1, final_test=final_test)
+            return
+        print("Final-test evaluation failed; campaign remains open.", file=sys.stderr)
+
+    _write_status("ready", "", iteration - 1, max_iterations, start_time, iter_times, client)
+    write_state("idle", iterations=iteration - 1, campaign_id=manifest.get("id"))
+    update_manifest(status="ready_to_continue_or_finalize", last_completed_at=datetime.now().isoformat())
+    print_run_summary(results_tsv, start_time, client, iteration - 1, final_test=None)
+    if final_prompts:
+        print("Campaign remains open. Continue with `python3 autoeval.py run` or close it with `python3 autoeval.py finalize`.")
 
 
 def main():

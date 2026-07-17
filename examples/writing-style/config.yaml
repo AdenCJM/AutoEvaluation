@@ -1,7 +1,7 @@
 # Writing Style Example — Configuration
 # =======================================
 # Copy this to the project root: cp examples/writing-style/config.yaml config.yaml
-# Then edit .env with your API key and run: python3 tools/run_loop.py
+# Then edit .env with your API key and run: python3 autoeval.py run
 
 # --- Provider ---
 provider: gemini

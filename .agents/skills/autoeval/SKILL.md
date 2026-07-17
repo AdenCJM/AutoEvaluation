@@ -28,10 +28,10 @@ python3 tools/dashboard_server.py --port 8050
 Run the crash-safe headless loop:
 
 ```bash
-python3 tools/run_loop.py
+python3 autoeval.py run
 ```
 
-Let it finish unless the user asks to stop. The driver owns locking, recovery, experiment isolation, statistical decisions, final-test evaluation, and cost accounting.
+Let the requested segment finish unless the user asks to stop. The driver owns locking, recovery, experiment isolation, statistical decisions, and cost accounting. Ordinary segments preserve the untouched final test; run `python3 autoeval.py finalize` only when the user confirms the campaign is complete.
 
 After each experiment, report the run ID, hypothesis/change, score with uncertainty, decision, validation result, and cumulative cost. Accept user steering for the next iteration without manually editing files mid-experiment.
 
