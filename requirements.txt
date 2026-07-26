@@ -1,5 +1,5 @@
 # Core dependency
-pyyaml>=6.0
+pyyaml>=6.0.3
 
 # Install ONE provider SDK based on your choice during setup:
 #   pip install google-genai      # Gemini
