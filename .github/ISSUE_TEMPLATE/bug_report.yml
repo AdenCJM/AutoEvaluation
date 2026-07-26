@@ -1,0 +1,49 @@
+name: Bug report
+description: Something in AutoEvaluation didn't work as documented.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, and what went wrong?
+      placeholder: |
+        Command: python3 autoeval.py run --iterations 3
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or logs
+      description: Paste the error output or relevant lines from .tmp/experiment_runner.log. Redact API keys and any private prompt content.
+      render: shell
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      placeholder: e.g. anthropic / claude-sonnet-5
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: python3 --version
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: e.g. macOS 15, Ubuntu 24.04
+    validations:
+      required: true
+  - type: checkboxes
+    id: checked-troubleshooting
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked docs/TROUBLESHOOTING.md and this isn't a known issue
+          required: true
+        - label: I did not include any API keys, prompt content, or generated outputs in this report
+          required: true

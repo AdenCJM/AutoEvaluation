@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an improvement to AutoEvaluation.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem?
+      description: What are you trying to do that AutoEvaluation doesn't support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: How would you like it to work? A CLI flag, config option, or behaviour change are all fine to sketch out.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds you're using today, or other approaches you considered.

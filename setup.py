@@ -836,6 +836,7 @@ def write_files(
 
 def main():
     parser = argparse.ArgumentParser(
+        prog=os.environ.get("AUTOEVAL_PROG_NAME", "setup.py"),
         description="Set up AutoEvaluation for your skill.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""

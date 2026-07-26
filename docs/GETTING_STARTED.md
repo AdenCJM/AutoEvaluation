@@ -7,8 +7,12 @@ This tutorial takes you from clone to a reviewed, finalized skill campaign. Budg
 ```bash
 git clone https://github.com/AdenCJM/AutoEvaluation.git
 cd AutoEvaluation
+python3 -m venv .venv
+source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
+
+The venv step matters: recent Python installs (Homebrew on macOS, most Linux distros) refuse `pip install` outside a virtual environment with an `externally-managed-environment` error. `./start.sh` (see the README's recommended path) creates this venv for you automatically — use the steps above only if you want to drive `pip` yourself.
 
 AutoEvaluation supports Gemini, OpenAI, and Anthropic. Create an API key with your chosen provider before setup.
 

@@ -1114,6 +1114,11 @@ async function openDetail(runId) {
         document.getElementById('detailSubtitle').textContent = run.change_description || 'Campaign baseline';
         const verdict = decision.training_verdict || {};
         const validation = decision.validation_verdict || {};
+        // The bundled demo replays a historical run's score history only — it has no
+        // decision.json/sample artifacts on disk, so say why plainly instead of a bare "unavailable".
+        const demoNote = data.is_demo
+            ? 'This bundled demo replays a historical campaign’s score history only — per-experiment rationale, diffs, and judge feedback were not captured in that older run format. Run your own campaign (python3 autoeval.py run) to see the full reasoning here.'
+            : null;
         const samples = (data.worst_samples || []).map(sample => `<div class="sample-card">
             <strong>${escapeHtml(sample.sample)} · ${pct(sample.score)}</strong>
             <div>${Object.entries(sample.reasons || {}).map(([name, reason]) => `<p><b>${escapeHtml(name)}:</b> ${escapeHtml(reason)}</p>`).join('')}</div>
@@ -1127,10 +1132,10 @@ async function openDetail(runId) {
             <div class="detail-stat"><span>Duration</span><strong>${decision.elapsed_seconds ? formatDurationSecs(decision.elapsed_seconds) : '—'}</strong></div>
             <div class="detail-stat"><span>Cost</span><strong>${decision.estimated_cost_usd != null ? '$' + Number(decision.estimated_cost_usd).toFixed(3) : '—'}</strong></div>
           </div>
-          <h3>Why this decision</h3><div class="reason-box">${escapeHtml(decision.reason || 'Detailed rationale was not recorded for this historical run.')}
+          <h3>Why this decision</h3><div class="reason-box">${escapeHtml(decision.reason || demoNote || 'Detailed rationale was not recorded for this run.')}
           ${validation.reason ? `<p><b>Validation:</b> ${escapeHtml(validation.reason)}</p>` : ''}</div>
-          <h3>Instruction diff</h3><pre class="diff">${escapeHtml(data.diff || 'Instruction snapshot unavailable for this run.')}</pre>
-          <h3>Weakest samples and judge feedback</h3>${samples || '<div class="reason-box">Sample artifacts unavailable for this run.</div>'}`;
+          <h3>Instruction diff</h3><pre class="diff">${escapeHtml(data.diff || demoNote || 'Instruction snapshot unavailable for this run.')}</pre>
+          <h3>Weakest samples and judge feedback</h3>${samples || `<div class="reason-box">${escapeHtml(demoNote || 'Sample artifacts unavailable for this run.')}</div>`}`;
     } catch (error) {
         document.getElementById('detailBody').innerHTML = `<div class="reason-box">${escapeHtml(error.message)}</div>`;
     }
@@ -1773,6 +1778,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
                 return
+            data["is_demo"] = self.demo_mode
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

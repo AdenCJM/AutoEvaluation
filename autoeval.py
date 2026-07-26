@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -14,9 +15,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 from campaigns import campaign_status, new_campaign  # noqa: E402
 
 
-def _run(script: str, args: list[str]) -> int:
+def _run(script: str, args: list[str], env: dict | None = None) -> int:
     try:
-        return subprocess.call([sys.executable, str(PROJECT_ROOT / script), *args], cwd=PROJECT_ROOT)
+        run_env = {**os.environ, **env} if env else None
+        return subprocess.call([sys.executable, str(PROJECT_ROOT / script), *args], cwd=PROJECT_ROOT, env=run_env)
     except KeyboardInterrupt:
         return 130
 
@@ -25,7 +27,7 @@ def main() -> None:
     # Setup owns a richer, evolving option surface. Forward everything after
     # `init` verbatim so callers do not have to learn a second wrapper schema.
     if len(sys.argv) > 1 and sys.argv[1] == "init":
-        raise SystemExit(_run("setup.py", sys.argv[2:]))
+        raise SystemExit(_run("setup.py", sys.argv[2:], env={"AUTOEVAL_PROG_NAME": "autoeval init"}))
 
     parser = argparse.ArgumentParser(
         prog="autoeval",
